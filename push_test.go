@@ -280,7 +280,7 @@ func TestPushBadRequestDropsTheEvent(t *testing.T) {
 	if p := rc.next(); p.id != second {
 		t.Fatalf("push %s, want %s at once", p.id, second)
 	}
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 2 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 2 {
 		t.Fatalf("%d events kept for polling", len(events))
 	}
 	if !strings.Contains(logs.String(), `msg="bridge: Muster refused a pushed event for good"`) {
@@ -355,7 +355,7 @@ func TestPushGivesUpAfterAnHour(t *testing.T) {
 		!strings.Contains(logs.String(), "attempts=21") {
 		t.Fatalf("log = %s", logs)
 	}
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 2 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 2 {
 		t.Fatalf("%d events kept for polling", len(events))
 	}
 }
@@ -529,7 +529,7 @@ func TestCloseStopsPushers(t *testing.T) {
 	clk.Advance(time.Hour)
 	reportPress(t, b, "u2")
 	rc.none()
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 2 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 2 {
 		t.Fatal("the reports stopped after Close")
 	}
 }

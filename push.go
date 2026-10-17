@@ -205,16 +205,16 @@ func (b *Bridge) attempt(ctx context.Context, target *pushTarget, ev StoredEvent
 }
 
 // webhookSignature is the webhook-signature header of a Standard Webhooks message: the version "v1", a comma, and
-// the standard base64 of the HMAC-SHA256 that secretKey makes of the signed content, which is the message id, the
+// the standard base64 of the HMAC-SHA256 that key makes of the signed content, which is the message id, the
 // timestamp and the payload, separated by full stops.
-func webhookSignature(secretKey []byte, msgID, sentAt string, payload []byte) string {
+func webhookSignature(key []byte, msgID, sentAt string, payload []byte) string {
 	signed := make([]byte, 0, len(msgID)+len(sentAt)+len(payload)+2)
 	signed = append(signed, msgID...)
 	signed = append(signed, '.')
 	signed = append(signed, sentAt...)
 	signed = append(signed, '.')
 	signed = append(signed, payload...)
-	h := hmac.New(sha256.New, secretKey)
+	h := hmac.New(sha256.New, key)
 	_, _ = h.Write(signed)
 	return "v1," + base64.StdEncoding.EncodeToString(h.Sum(nil))
 }

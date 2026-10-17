@@ -124,8 +124,9 @@ example, so that a restarted example never reuses an id that Muster still holds.
 6. For pushes, give a bot a `PushTarget` — the callback URL and the push secret that its Bridge Connection in Muster
    shows — in `Config.Bots` or later with `b.SetPush`; `b.Close` stops the pushers.
 7. `bridge.NewMemoryStore`, the default `Store`, forgets Idempotency-Keys and queued events on a restart, and holds a
-   day of events and answers in memory; implement `Store` over your database to keep them. Long polls and pushes are woken in the process that queued an event, so
-   with several processes over one store, run each bot in one process only.
+   day of events and answers in memory; implement `Store` over your database to keep them. Long polls and pushes are
+   woken in the process that queued an event, so with several processes over one store, run each bot in one process
+   only.
 
 The package documentation, on [pkg.go.dev](https://pkg.go.dev/github.com/muster-io/muster-bridge-go) and in
 [`doc.go`](doc.go), describes what the library does for every operation; [`example_test.go`](example_test.go) has

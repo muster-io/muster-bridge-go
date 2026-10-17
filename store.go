@@ -24,9 +24,9 @@ type Store interface {
 	// when another claim holds the key until after now; else it claims the key until `until` and returns KeyClaimed
 	// with an ID that tells this claim from any later claim of the same key.
 	ClaimKey(ctx context.Context, bot, key string, now, until time.Time) (KeyClaim, error)
-	// SaveKey stores the answer of (bot, key), kept until `until`, in place of the claim claimID. When another claim
-	// or an answer holds the key, SaveKey leaves it as it is: the first answer stays, and so does a newer request's
-	// claim.
+	// SaveKey stores the answer of (bot, key), kept until `until`, in place of the claim claimID. When nothing holds the
+	// key, because the claim expired and was forgotten, it stores the answer all the same. When another claim or an
+	// answer holds the key, SaveKey leaves it as it is: the first answer stays, and so does a newer request's claim.
 	SaveKey(ctx context.Context, bot, key, claimID string, answer StoredAnswer, until time.Time) error
 	// ReleaseKey removes the claim claimID of (bot, key), so that a retry with the key runs again. It removes nothing
 	// else: not an answer, and not the claim of a request that took the key over after claimID expired.

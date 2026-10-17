@@ -23,20 +23,21 @@ var alice = Person{ExternalId: "u-alice", DisplayName: "Alice Smith", Handle: ne
 // linkToken is an Account link token: 43 characters of base64url.
 var linkToken = strings.Repeat("Ab0_-", 8) + "xyz"
 
-// batch is an answer of pollEvents.
-type batch struct {
-	Events     []json.RawMessage `json:"events"`
-	NextCursor string            `json:"next_cursor"`
+// polled holds what one GET /v1/events returned: the cursor to send next, and each event as its raw JSON, so that a
+// test compares the exact bytes the bridge wrote.
+type polled struct {
+	Cursor string            `json:"next_cursor"`
+	Raw    []json.RawMessage `json:"events"`
 }
 
-func poll(t testing.TB, b *Bridge, token, query string) batch {
+func poll(t testing.TB, b *Bridge, token, query string) polled {
 	t.Helper()
 	rec := do(t, b.Handler(), http.MethodGet, "/v1/events"+query, token, nil, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("poll answered %d: %s", rec.Code, rec.Body)
 	}
-	var out batch
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Events == nil {
+	var out polled
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Raw == nil {
 		t.Fatalf("poll answer %s: %v", rec.Body, err)
 	}
 	return out
@@ -58,10 +59,10 @@ func TestPressQueuesEvent(t *testing.T) {
 	want := `{"data":"a1.k2.sig","id":"` + eventIDOf("main", EventTypePress, "u1") + `","message_id":"m2",` +
 		`"occurred_at":"2026-10-18T10:00:00.123Z","type":"press",` +
 		`"user":{"display_name":"Alice Smith","external_id":"u-alice","handle":"alice"}}`
-	if len(got.Events) != 1 || string(got.Events[0]) != want {
-		t.Fatalf("events %s, want [%s]", got.Events, want)
+	if len(got.Raw) != 1 || string(got.Raw[0]) != want {
+		t.Fatalf("events %s, want [%s]", got.Raw, want)
 	}
-	if strings.Contains(string(got.Events[0]), "chat-1") {
+	if strings.Contains(string(got.Raw[0]), "chat-1") {
 		t.Fatal("the chat was sent to Muster")
 	}
 }
@@ -72,7 +73,7 @@ func TestOccurredAtDefaultsToClock(t *testing.T) {
 	if err := b.MessageDeleted(context.Background(), "main", MessageDeleted{UpdateID: "u1", MessageID: "m1"}); err != nil {
 		t.Fatal(err)
 	}
-	ev := decodeJSON(t, poll(t, b, tokenMain, "?wait=0").Events[0])
+	ev := decodeJSON(t, poll(t, b, tokenMain, "?wait=0").Raw[0])
 	if ev["occurred_at"] != "2026-10-18T10:01:30Z" {
 		t.Fatalf("occurred_at %v", ev["occurred_at"])
 	}
@@ -86,7 +87,7 @@ func TestRandomIDWithoutUpdateID(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	events := poll(t, b, tokenMain, "?wait=0").Events
+	events := poll(t, b, tokenMain, "?wait=0").Raw
 	want := base64.RawURLEncoding.EncodeToString(random[:16])
 	if len(events) != 1 || decodeJSON(t, events[0])["id"] != want || len(want) != 22 {
 		t.Fatalf("events %s, want one with the id %s", events, want)
@@ -106,7 +107,7 @@ func TestUpdateReportedTwiceQueuedOnce(t *testing.T) {
 		}
 		clk.Advance(time.Second)
 	}
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 1 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 1 {
 		t.Fatalf("%d events", len(events))
 	}
 }
@@ -123,10 +124,10 @@ func TestSameUpdateIDOtherTypeIsAnotherEvent(t *testing.T) {
 	if err := b.Press(ctx, "other", Press{UpdateID: "7", MessageID: "m1", User: alice, Data: "d"}); err != nil {
 		t.Fatal(err)
 	}
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 2 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 2 {
 		t.Fatalf("%d events of main", len(events))
 	}
-	if events := poll(t, b, tokenOther, "?wait=0").Events; len(events) != 1 {
+	if events := poll(t, b, tokenOther, "?wait=0").Raw; len(events) != 1 {
 		t.Fatalf("%d events of other", len(events))
 	}
 }
@@ -142,7 +143,7 @@ func TestThreadMessageEvent(t *testing.T) {
 		User: alice, Text: strings.Repeat("é", 4001)}); err != nil {
 		t.Fatal(err)
 	}
-	events := poll(t, b, tokenMain, "?wait=0").Events
+	events := poll(t, b, tokenMain, "?wait=0").Raw
 	if !strings.Contains(string(events[0]), `"thread_ref":null`) || !strings.Contains(string(events[0]),
 		`"type":"thread_message"`) {
 		t.Fatalf("event %s", events[0])
@@ -161,7 +162,7 @@ func TestMessageDeletedEvent(t *testing.T) {
 	}
 	want := `{"id":"` + eventIDOf("main", EventTypeMessageDeleted, "d1") + `","message_id":"m1",` +
 		`"occurred_at":"2026-10-18T10:00:00Z","type":"message_deleted"}`
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 1 || string(events[0]) != want {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 1 || string(events[0]) != want {
 		t.Fatalf("events %s, want [%s]", events, want)
 	}
 }
@@ -191,7 +192,7 @@ func TestDirectMessageAccountLink(t *testing.T) {
 				Text: tt.text, Chat: "dm-alice"}); err != nil {
 				t.Fatal(err)
 			}
-			events := poll(t, b, tokenMain, "?wait=0").Events
+			events := poll(t, b, tokenMain, "?wait=0").Raw
 			if !tt.link {
 				if len(events) != 0 {
 					t.Fatalf("an ordinary direct message became %s", events)
@@ -273,7 +274,7 @@ func TestReportInvalidEvent(t *testing.T) {
 			t.Errorf("error %v, want ErrInvalidEvent: %s", tt.err, tt.want)
 		}
 	}
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 0 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 0 {
 		t.Fatalf("invalid events were queued: %s", events)
 	}
 }
@@ -284,7 +285,7 @@ func TestDisplayNameCutAndHandleDropped(t *testing.T) {
 	if err := b.Press(context.Background(), "main", Press{MessageID: "m1", User: p, Data: "d"}); err != nil {
 		t.Fatal(err)
 	}
-	user := decodeJSON(t, poll(t, b, tokenMain, "?wait=0").Events[0])["user"].(map[string]any)
+	user := decodeJSON(t, poll(t, b, tokenMain, "?wait=0").Raw[0])["user"].(map[string]any)
 	if user["display_name"] != strings.Repeat("é", 200) || user["handle"] != nil {
 		t.Fatalf("user %v", user)
 	}
@@ -296,7 +297,7 @@ func TestDisplayNameCutAndHandleDropped(t *testing.T) {
 func TestPollAnswersAtOnce(t *testing.T) {
 	b, _, clk, _ := newTestBridge(t, nil)
 	reportPress(t, b, "u1")
-	if events := poll(t, b, tokenMain, "").Events; len(events) != 1 {
+	if events := poll(t, b, tokenMain, "").Raw; len(events) != 1 {
 		t.Fatalf("%d events", len(events))
 	}
 	if clk.pending() != 0 {
@@ -336,8 +337,8 @@ func TestPollWaitsForEvent(t *testing.T) {
 	clk.awaitTimer(t, defaultPollWait)
 	reportPress(t, b, "u1")
 	rec := await(t, done)
-	var got batch
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || len(got.Events) != 1 {
+	var got polled
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || len(got.Raw) != 1 {
 		t.Fatalf("the long poll answered %s", rec.Body)
 	}
 	if clk.pending() != 0 {
@@ -348,11 +349,11 @@ func TestPollWaitsForEvent(t *testing.T) {
 func TestPollWaitEndsEmpty(t *testing.T) {
 	b, _, clk, _ := newTestBridge(t, nil)
 	first := poll(t, b, tokenMain, "?wait=0")
-	done := pollAsync(context.Background(), t, b, "?wait=5&cursor="+first.NextCursor)
+	done := pollAsync(context.Background(), t, b, "?wait=5&cursor="+first.Cursor)
 	clk.awaitTimer(t, 5*time.Second)
 	clk.Advance(5 * time.Second)
 	rec := await(t, done)
-	if rec.Body.String() != `{"events":[],"next_cursor":"`+first.NextCursor+`"}` {
+	if rec.Body.String() != `{"events":[],"next_cursor":"`+first.Cursor+`"}` {
 		t.Fatalf("the long poll answered %s", rec.Body)
 	}
 }
@@ -360,7 +361,7 @@ func TestPollWaitEndsEmpty(t *testing.T) {
 func TestPollWaitZero(t *testing.T) {
 	b, _, clk, _ := newTestBridge(t, nil)
 	got := poll(t, b, tokenMain, "?wait=0")
-	if len(got.Events) != 0 || got.NextCursor == "" || clk.pending() != 0 {
+	if len(got.Raw) != 0 || got.Cursor == "" || clk.pending() != 0 {
 		t.Fatalf("poll %v, %d timers", got, clk.pending())
 	}
 }
@@ -384,10 +385,10 @@ func TestPollCursorAdvances(t *testing.T) {
 	var order []string
 	for _, want := range []int{100, 50, 0} {
 		got := poll(t, b, tokenMain, "?wait=0&cursor="+cursor)
-		if len(got.Events) != want {
-			t.Fatalf("%d events, want %d", len(got.Events), want)
+		if len(got.Raw) != want {
+			t.Fatalf("%d events, want %d", len(got.Raw), want)
 		}
-		for _, raw := range got.Events {
+		for _, raw := range got.Raw {
 			id := decodeJSON(t, raw)["id"].(string)
 			if seen[id] {
 				t.Fatalf("the event %s came twice", id)
@@ -395,7 +396,7 @@ func TestPollCursorAdvances(t *testing.T) {
 			seen[id] = true
 			order = append(order, id)
 		}
-		cursor = got.NextCursor
+		cursor = got.Cursor
 	}
 	for i, id := range order {
 		if id != eventIDOf("main", EventTypePress, fmt.Sprint("u", i)) {
@@ -407,11 +408,11 @@ func TestPollCursorAdvances(t *testing.T) {
 func TestPollEventsPerBot(t *testing.T) {
 	b, _, _, _ := newTestBridge(t, nil)
 	reportPress(t, b, "u1")
-	if events := poll(t, b, tokenOther, "?wait=0").Events; len(events) != 0 {
+	if events := poll(t, b, tokenOther, "?wait=0").Raw; len(events) != 0 {
 		t.Fatalf("the other bot got %s", events)
 	}
 	main := poll(t, b, tokenMain, "?wait=0")
-	rec := do(t, b.Handler(), http.MethodGet, "/v1/events?wait=0&cursor="+main.NextCursor, tokenOther, nil, "")
+	rec := do(t, b.Handler(), http.MethodGet, "/v1/events?wait=0&cursor="+main.Cursor, tokenOther, nil, "")
 	wantProblem(t, rec, http.StatusBadRequest, ClassInvalid)
 }
 
@@ -419,11 +420,11 @@ func TestPollKeepsEvents24Hours(t *testing.T) {
 	b, _, clk, _ := newTestBridge(t, nil)
 	reportPress(t, b, "u1")
 	clk.Advance(24*time.Hour - time.Second)
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 1 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 1 {
 		t.Fatal("the event was gone before 24 hours")
 	}
 	clk.Advance(time.Second)
-	if events := poll(t, b, tokenMain, "?wait=0").Events; len(events) != 0 {
+	if events := poll(t, b, tokenMain, "?wait=0").Raw; len(events) != 0 {
 		t.Fatal("the event was kept after 24 hours")
 	}
 }
