@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT
+# Copyright The Muster Authors
+
+# golangci-lint v2 (make lint, make fmt). Every //nolint names its linter and states its reason.
+version: "2"
+run:
+  relative-path-mode: gomod
+linters:
+  default: none
+  enable: [bodyclose, copyloopvar, errcheck, errorlint, exhaustive, forbidigo, gocritic, gosec, govet, ineffassign, intrange, misspell, nilerr, noctx, nolintlint, revive, staticcheck, unconvert, unparam, unused, usestdlibvars, wastedassign]
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: log through the Config's *slog.Logger
+        - pattern: ^(print|println)$
+          msg: log through the Config's *slog.Logger
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    generated: strict
+    presets: [comments, common-false-positives, std-error-handling]
+    rules:
+      - path: _test\.go$
+        linters: [gosec]
+        text: G101
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable: [gofmt, goimports]
+  settings:
+    gofmt:
+      rewrite-rules:
+        - pattern: interface{}
+          replacement: any
+    goimports:
+      local-prefixes: [github.com/muster-io/muster-bridge-go]

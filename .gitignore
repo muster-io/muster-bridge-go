@@ -1,0 +1,4 @@
+# Build output, installed tools, coverage profiles and conformance runs
+/bin/
+# Local, unpublished files of the maintainer
+CLAUDE.local.md

@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: MIT
+// Copyright The Muster Authors
+
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:best-practices"],
+  rangeStrategy: "pin",
+  postUpdateOptions: ["gomodTidy"],
+  dependencyDashboard: true,
+  // Version policy, as in Muster's repository: routine updates arrive once a week, grouped per ecosystem, and merge
+  // themselves when every required check passes. Major updates wait in the Dependency Dashboard until a maintainer
+  // ticks them. Security fixes are not held by the schedule.
+  schedule: ["before 6am on Monday"],
+  minimumReleaseAge: "3 days",
+  prConcurrentLimit: 4,
+  prHourlyLimit: 2,
+  // A tool version pinned on the line under a `# renovate:` comment: `NAME_VERSION := v1.2.3` in the Makefile,
+  // `NAME_VERSION: v1.2.3` in a workflow's env.
+  customManagers: [
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^Makefile$/", "/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*[A-Z_]+_VERSION(?: :=|:) (?<currentValue>\\S+)",
+      ],
+    },
+  ],
+  packageRules: [
+    {
+      matchUpdateTypes: ["major"],
+      dependencyDashboardApproval: true,
+    },
+    {
+      matchUpdateTypes: ["minor", "patch", "pin", "pinDigest", "digest"],
+      automerge: true,
+      automergeType: "pr",
+      platformAutomerge: true,
+    },
+    {
+      matchDatasources: ["github-actions"],
+      groupName: "GitHub Actions",
+    },
+    {
+      matchDatasources: ["go"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "Go modules (non-major)",
+    },
+    {
+      matchPackageNames: ["/oapi-codegen/"],
+      matchDatasources: ["go"],
+      prBodyNotes: "Regenerate models.gen.go with `make generate` and commit it.",
+    },
+    // go.mod's go line stays at the older of the two supported Go releases, and the CI's Go versions are moved by
+    // hand when Go releases: neither is updated by Renovate.
+    {
+      matchDatasources: ["golang-version"],
+      enabled: false,
+    },
+  ],
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 3am on Monday"],
+  },
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ["security"],
+  },
+}
