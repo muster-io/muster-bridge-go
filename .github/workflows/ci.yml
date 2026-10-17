@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: MIT
+# Copyright The Muster Authors
+
+# The checks of every pull request and of master, joined in the job ci, which the ruleset of master requires. The
+# daily run catches a change on Muster's side: a new api/bridge.yaml (spec) and a new edge image (conformance).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Never switch to another toolchain than the one setup-go installed: the test matrix tests exactly its two releases.
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      # bin/tools keeps the tools the Makefile builds; the key changes with the Go toolchain and the tool versions.
+      - name: compute the key of the Go tools
+        id: tools
+        run: |
+          lines=$(grep -E '^[A-Z_]+_(PKG|VERSION) :=' Makefile | sha256sum | cut -c1-16)
+          echo "key=go-tools-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_JOB-$(go env GOVERSION)-$lines" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bin/tools
+          key: ${{ steps.tools.outputs.key }}
+      - run: make lint
+
+  # The race detector and the coverage gate on both supported Go releases: go.mod's go line is the older one.
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.26.x', '1.27.x']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go version
+      - run: make test
+
+  generate:
+    name: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      - name: compute the key of the Go tools
+        id: tools
+        run: |
+          lines=$(grep -E '^[A-Z_]+_(PKG|VERSION) :=' Makefile | sha256sum | cut -c1-16)
+          echo "key=go-tools-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_JOB-$(go env GOVERSION)-$lines" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bin/tools
+          key: ${{ steps.tools.outputs.key }}
+      - run: make generate-check
+
+  # api/bridge.yaml is the copy of the one on Muster's master, byte for byte.
+  spec:
+    name: spec
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make spec-check
+
+  licenses:
+    name: licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      - name: compute the key of the Go tools
+        id: tools
+        run: |
+          lines=$(grep -E '^[A-Z_]+_(PKG|VERSION) :=' Makefile | sha256sum | cut -c1-16)
+          echo "key=go-tools-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_JOB-$(go env GOVERSION)-$lines" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bin/tools
+          key: ${{ steps.tools.outputs.key }}
+      - run: make licenses
+
+  vulncheck:
+    name: vulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      - name: compute the key of the Go tools
+        id: tools
+        run: |
+          lines=$(grep -E '^[A-Z_]+_(PKG|VERSION) :=' Makefile | sha256sum | cut -c1-16)
+          echo "key=go-tools-$RUNNER_OS-$RUNNER_ARCH-$GITHUB_JOB-$(go env GOVERSION)-$lines" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bin/tools
+          key: ${{ steps.tools.outputs.key }}
+      - run: make vulncheck
+
+  # muster bridge check from Muster's newest development image against examples/minimal, three times.
+  conformance:
+    name: conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      - run: make conformance
+
+  # The required check: it passes only when every job above succeeded, and fails when one failed, was cancelled or
+  # was skipped.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint, test, generate, spec, licenses, vulncheck, conformance]
+    if: ${{ always() }}
+    steps:
+      - name: every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success")' >/dev/null

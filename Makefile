@@ -10,7 +10,8 @@ MODULE := github.com/muster-io/muster-bridge-go
 BIN := bin
 TOOLS := $(BIN)/tools
 
-GO_TOOLCHAIN := $(shell $(GO) env GOVERSION)
+# Evaluated only when a tool is built, so that targets without Go, such as spec-check, need no Go.
+GO_TOOLCHAIN = $(shell $(GO) env GOVERSION)
 GOLANGCI_LINT_PKG := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 # renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
 GOLANGCI_LINT_VERSION := v2.14.0
