@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Copyright The Muster Authors
+
+# oapi-codegen: the models of the Bridge protocol from the copy api/bridge.yaml (make generate).
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oapi-codegen/oapi-codegen/v2.8.0/configuration-schema.json
+package: bridge
+output: models.gen.go
+generate:
+  models: true
+compatibility:
+  always-prefix-enum-values: true # ProblemScopeBot, not Bot, which names the bots of a bridge
+output-options:
+  skip-prune: true # keep every schema of the spec, also those only webhooks reach
+  generate-types-for-anonymous-schemas: true # Capabilities_Buttons, not an anonymous struct
