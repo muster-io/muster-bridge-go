@@ -26,7 +26,7 @@ type notebook struct {
 
 func (n *notebook) PostMessage(_ context.Context, _ string, in bridge.MessageInput) (bridge.MessagePosted, error) {
 	if in.ChannelId != "alerts" {
-		return bridge.MessagePosted{}, bridge.ForbiddenError("The bot is not a member of this channel.")
+		return bridge.MessagePosted{}, bridge.ForbiddenError("The bot has not joined this channel.")
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -40,7 +40,7 @@ func (n *notebook) EditMessage(_ context.Context, _, id string, in bridge.Messag
 	defer n.mu.Unlock()
 	i, err := strconv.Atoi(strings.TrimPrefix(id, "n"))
 	if err != nil || i < 1 || i > len(n.messages) {
-		return bridge.MessageEdited{}, bridge.GoneError("The message no longer exists.")
+		return bridge.MessageEdited{}, bridge.GoneError("That message is gone.")
 	}
 	n.messages[i-1].Title, n.messages[i-1].Body = in.Title, in.Body
 	return bridge.MessageEdited{}, nil
@@ -53,7 +53,7 @@ func (n *notebook) ReplyInThread(_ context.Context, _, id string, _ bridge.Threa
 
 func (n *notebook) CheckChannel(_ context.Context, _, channelID string) (string, error) {
 	if channelID != "alerts" {
-		return "", bridge.ForbiddenError("The bot is not a member of this channel.")
+		return "", bridge.ForbiddenError("The bot has not joined this channel.")
 	}
 	return "Alerts", nil
 }
@@ -219,6 +219,7 @@ func ExampleGoneError() {
 }
 
 // A Store implementation follows the memory store: a key is claimed while its request runs, then holds its answer.
+// Only the holder of a claim, named by its ID, saves or releases it.
 func ExampleNewMemoryStore() {
 	ctx := context.Background()
 	store := bridge.NewMemoryStore()
@@ -226,13 +227,13 @@ func ExampleNewMemoryStore() {
 
 	claim, _ := store.ClaimKey(ctx, "main", "key-1", now, now.Add(2*time.Minute))
 	fmt.Println(claim.State == bridge.KeyClaimed)
-	claim, _ = store.ClaimKey(ctx, "main", "key-1", now, now.Add(2*time.Minute))
-	fmt.Println(claim.State == bridge.KeyRunning)
+	running, _ := store.ClaimKey(ctx, "main", "key-1", now, now.Add(2*time.Minute))
+	fmt.Println(running.State == bridge.KeyRunning)
 
 	answer := bridge.StoredAnswer{Status: http.StatusCreated, Body: []byte(`{"message_id":"n1","replayed":false}`)}
-	_ = store.SaveKey(ctx, "main", "key-1", answer, now.Add(24*time.Hour))
-	claim, _ = store.ClaimKey(ctx, "main", "key-1", now.Add(time.Hour), now.Add(time.Hour+2*time.Minute))
-	fmt.Println(claim.State == bridge.KeyAnswered, claim.Answer.Status)
+	_ = store.SaveKey(ctx, "main", "key-1", claim.ID, answer, now.Add(24*time.Hour))
+	later, _ := store.ClaimKey(ctx, "main", "key-1", now.Add(time.Hour), now.Add(time.Hour+2*time.Minute))
+	fmt.Println(later.State == bridge.KeyAnswered, later.Answer.Status)
 	// Output:
 	// true
 	// true

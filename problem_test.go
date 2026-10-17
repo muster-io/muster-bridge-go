@@ -35,10 +35,10 @@ func TestErrorClassesBecomeProblems(t *testing.T) {
 			"0", ProblemScopeChannel, ""},
 		{"rate_limited negative", &Error{Class: ClassRateLimited, Detail: "x", RetryAfter: -time.Second},
 			http.StatusTooManyRequests, "0", ProblemScopeChannel, ""},
-		{"gone", GoneError("The message no longer exists."), http.StatusNotFound, "", "", ""},
+		{"gone", GoneError("That message is gone."), http.StatusNotFound, "", "", ""},
 		{"gone edit window", GoneError("Too old.", ReasonEditWindowClosed), http.StatusNotFound, "", "",
 			ProblemReasonEditWindowClosed},
-		{"forbidden", ForbiddenError("The bot is not a member of this channel."), http.StatusForbidden, "", "", ""},
+		{"forbidden", ForbiddenError("The bot has not joined this channel."), http.StatusForbidden, "", "", ""},
 		{"invalid", InvalidError("Too long for this messenger."), http.StatusBadRequest, "", "", ""},
 	}
 	for _, tt := range tests {
@@ -332,5 +332,37 @@ func TestDescribeSchemaErrorOf2020Messages(t *testing.T) {
 		Reason: `string doesn't match the format "uri" (parse "SECRET": invalid)`}
 	if _, reason := describeSchemaError(format); reason != `string doesn't match the format "uri"` {
 		t.Errorf("format: %q", reason)
+	}
+}
+
+// The protocol defines one reason, edit_window_closed, and only for gone; any other reason a messenger gives is
+// dropped from the answer and logged as a mistake of the bridge.
+func TestUndefinedReasonIsNotSent(t *testing.T) {
+	b, m, _, logs := newTestBridge(t, nil)
+	m.edit = func(string, string, MessageContent) (MessageEdited, error) {
+		return MessageEdited{}, &Error{Class: ClassGone, Detail: "The message is gone.", Reason: "weird"}
+	}
+	rec := do(t, b.Handler(), http.MethodPatch, "/v1/messages/m1", tokenMain, nil, editBody)
+	if p := wantProblem(t, rec, http.StatusNotFound, ClassGone); p.Reason != nil || detailOf(p) != "The message is gone." {
+		t.Fatalf("problem %s", rec.Body)
+	}
+	m.edit = func(string, string, MessageContent) (MessageEdited, error) {
+		return MessageEdited{}, &Error{Class: ClassForbidden, Reason: ReasonEditWindowClosed}
+	}
+	rec = do(t, b.Handler(), http.MethodPatch, "/v1/messages/m1", tokenMain, nil, editBody)
+	if p := wantProblem(t, rec, http.StatusForbidden, ClassForbidden); p.Reason != nil {
+		t.Fatalf("problem %s", rec.Body)
+	}
+	m.edit = func(string, string, MessageContent) (MessageEdited, error) {
+		return MessageEdited{}, GoneError("Too old to edit.", ReasonEditWindowClosed)
+	}
+	rec = do(t, b.Handler(), http.MethodPatch, "/v1/messages/m1", tokenMain, nil, editBody)
+	if p := wantProblem(t, rec, http.StatusNotFound, ClassGone); p.Reason == nil || *p.Reason != ReasonEditWindowClosed {
+		t.Fatalf("problem %s", rec.Body)
+	}
+	log := logs.String()
+	if n := strings.Count(log, "a reason the protocol does not define"); n != 2 ||
+		!strings.Contains(log, "reason=weird") || !strings.Contains(log, "reason=edit_window_closed") {
+		t.Fatalf("%d mistakes logged: %s", n, log)
 	}
 }

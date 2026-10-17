@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -21,22 +20,22 @@ import (
 // Class is the class of an error, which tells Muster what to do about it.
 type Class string
 
-// The classes of the protocol.
+// The classes of the protocol, the values of ErrorClass in api/bridge.yaml.
 const (
 	// ClassTransient is a temporary failure, such as a messenger that is down or a timeout; Muster retries.
-	ClassTransient Class = "transient"
+	ClassTransient = Class(ErrorClassTransient)
 	// ClassRateLimited means the messenger or the bridge throttles; Muster waits RetryAfter.
-	ClassRateLimited Class = "rate_limited"
+	ClassRateLimited = Class(ErrorClassRateLimited)
 	// ClassGone means the message, its Thread or the event no longer exists.
-	ClassGone Class = "gone"
-	// ClassForbidden means the channel is missing, or the bot cannot use it or was blocked.
-	ClassForbidden Class = "forbidden"
+	ClassGone = Class(ErrorClassGone)
+	// ClassForbidden means the channel does not exist, the bot lacks the rights there, or a person blocked the bot.
+	ClassForbidden = Class(ErrorClassForbidden)
 	// ClassInvalid means the request cannot succeed as sent.
-	ClassInvalid Class = "invalid"
+	ClassInvalid = Class(ErrorClassInvalid)
 )
 
-// ReasonEditWindowClosed is the reason of a gone answer to an edit that the messenger refuses only because of the age
-// of the message.
+// ReasonEditWindowClosed tells Muster that an edit failed as gone because the messenger allows no edits to a message
+// that old, while the message itself still exists; Muster then posts a new Root message.
 const ReasonEditWindowClosed = ProblemReasonEditWindowClosed
 
 // Error is an answer of the messenger that the bridge classifies for Muster. A Messenger method returns one to answer
@@ -51,7 +50,8 @@ type Error struct {
 	RetryAfter time.Duration
 	// Scope is what the wait of ClassRateLimited holds: ProblemScopeChannel (the default) or ProblemScopeBot.
 	Scope ProblemScope
-	// Reason is ReasonEditWindowClosed for a ClassGone edit refused only because of the message's age, else empty.
+	// Reason is ReasonEditWindowClosed on a ClassGone answer to an edit when the message is too old to edit; empty
+	// otherwise. The library sends no other reason, and logs one as a mistake of the bridge.
 	Reason ProblemReason
 }
 
@@ -77,8 +77,8 @@ func RateLimitedError(wait time.Duration, scope ProblemScope, detail string) *Er
 	return &Error{Class: ClassRateLimited, Detail: detail, RetryAfter: wait, Scope: scope}
 }
 
-// GoneError says that the message or its Thread no longer exists; with ReasonEditWindowClosed, that the messenger
-// refuses the edit only because of the message's age. Only the first reason is used.
+// GoneError says that the message or its Thread no longer exists. With ReasonEditWindowClosed it says instead that
+// the message is past the messenger's edit window. Only the first reason is used.
 func GoneError(detail string, reason ...ProblemReason) *Error {
 	e := &Error{Class: ClassGone, Detail: detail}
 	if len(reason) > 0 {
@@ -87,8 +87,8 @@ func GoneError(detail string, reason ...ProblemReason) *Error {
 	return e
 }
 
-// ForbiddenError says that the channel is missing, the bot cannot use it, or the person blocked the bot. A missing
-// channel is forbidden, never gone.
+// ForbiddenError says that the channel does not exist, the bot lacks the rights there, or the person blocked the bot.
+// A channel that does not exist is forbidden, never gone.
 func ForbiddenError(detail string) *Error {
 	return &Error{Class: ClassForbidden, Detail: detail}
 }
@@ -156,39 +156,44 @@ func (b *Bridge) writeError(w http.ResponseWriter, e *Error, secrets ...string) 
 }
 
 // writeProblem writes e as a problem with the status, which is the class's own except for the 404 of an operation the
-// bridge does not serve.
+// bridge does not serve. rate_limited adds Retry-After and its scope; gone adds the one reason the protocol defines.
 func (b *Bridge) writeProblem(w http.ResponseWriter, status int, e *Error, secrets ...string) {
-	class := ErrorClass(e.Class)
-	title := classTitle[e.Class]
-	p := Problem{Title: &title, Status: &status, Class: &class}
-	if d := cutRunes(b.redact(e.Detail, secrets...), maxDetail); d != "" {
-		p.Detail = &d
+	body := Problem{
+		Class:  new(ErrorClass(e.Class)),
+		Status: new(status),
+		Title:  new(classTitle[e.Class]),
+		Detail: presentOrNil(cutRunes(b.redact(e.Detail, secrets...), maxDetail)),
 	}
-	switch e.Class {
-	case ClassRateLimited:
-		scope := e.Scope
-		if scope != ProblemScopeBot {
-			scope = ProblemScopeChannel
+	if e.Class == ClassRateLimited {
+		body.Scope = new(ProblemScopeChannel)
+		if e.Scope == ProblemScopeBot {
+			body.Scope = new(ProblemScopeBot)
 		}
-		p.Scope = &scope
 		w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(e.RetryAfter), 10))
-	case ClassGone:
-		if e.Reason != "" {
-			reason := e.Reason
-			p.Reason = &reason
-		}
-	default:
 	}
-	writeJSON(w, status, "application/problem+json", mustMarshal(p))
+	if e.Class == ClassGone && e.Reason == ReasonEditWindowClosed {
+		body.Reason = new(ReasonEditWindowClosed)
+	}
+	writeJSON(w, status, "application/problem+json", mustMarshal(body))
 }
 
-// writeUnauthorized answers a missing or wrong token.
+// writeUnauthorized answers a request without a bot's token, as the Unauthorized answer of the specification.
 func (b *Bridge) writeUnauthorized(w http.ResponseWriter) {
-	class, title, status, detail := ErrorClassForbidden, "Unauthorized", http.StatusUnauthorized,
-		"The token is missing or wrong."
 	w.Header().Set("WWW-Authenticate", "Bearer")
-	writeJSON(w, status, "application/problem+json",
-		mustMarshal(Problem{Title: &title, Status: &status, Class: &class, Detail: &detail}))
+	writeJSON(w, http.StatusUnauthorized, "application/problem+json", mustMarshal(Problem{
+		Class:  new(ErrorClassForbidden),
+		Status: new(http.StatusUnauthorized),
+		Title:  new("Unauthorized"),
+		Detail: new("The token is missing or wrong."),
+	}))
+}
+
+// presentOrNil points at s, or is nil for an empty s, so that an empty detail is left out of the problem.
+func presentOrNil(s string) *string {
+	if s != "" {
+		return &s
+	}
+	return nil
 }
 
 // retryAfterSeconds is d in whole seconds, rounded up; a negative d is 0.
@@ -199,17 +204,14 @@ func retryAfterSeconds(d time.Duration) int64 {
 	return int64((d + time.Second - 1) / time.Second)
 }
 
-// cutRunes cuts s to at most n code points.
+// cutRunes keeps the first n code points of s.
 func cutRunes(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	count := 0
-	for i := range s {
-		if count == n {
-			return s[:i]
+	seen := 0
+	for at := range s {
+		if seen == n {
+			return s[:at]
 		}
-		count++
+		seen++
 	}
 	return s
 }

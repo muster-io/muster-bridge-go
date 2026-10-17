@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -129,8 +130,8 @@ func configure(tokenFile, channels, users, pushURL, pushSecretFile string, log *
 		caps.Delete = &bridge.Capabilities_Delete{}
 	}
 
-	c := &chat{log: log, channels: map[string]bool{}, people: people, private: on["private_answers"],
-		native: on["native_mentions"], messages: map[string]*message{}}
+	c := &chat{log: log, idPrefix: strings.ToLower(rand.Text()[:6]), channels: map[string]bool{}, people: people,
+		private: on["private_answers"], native: on["native_mentions"], messages: map[string]*message{}}
 	for ch := range strings.SplitSeq(channels, ",") {
 		if ch = strings.TrimSpace(ch); ch != "" {
 			c.channels[ch] = true
@@ -163,16 +164,16 @@ func features() (map[string]bool, error) {
 	return on, nil
 }
 
+// readSecret returns the token or push secret a file holds, without the white space around it.
 func readSecret(path string) (string, error) {
-	b, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	s := strings.TrimSpace(string(b))
-	if s == "" {
-		return "", errors.New("the file is empty")
+	if secret := strings.TrimSpace(string(data)); secret != "" {
+		return secret, nil
 	}
-	return s, nil
+	return "", errors.New("it holds no secret")
 }
 
 func parseUsers(list string) (map[string]bridge.Person, error) {
@@ -207,7 +208,8 @@ func serve(addr string, b *bridge.Bridge, c *chat, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// No WriteTimeout: a long poll of /v1/events holds its answer up to 60 seconds.
+	// No WriteTimeout: a long poll of /v1/events holds its answer up to 60 seconds, and a WriteTimeout shorter than
+	// that, plus Muster's margin, would cut it off. A real bridge either sets none or one above 75 seconds.
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
@@ -239,7 +241,10 @@ type message struct {
 // chat is the in-memory messenger: it implements bridge.Messenger, bridge.UserFinder, bridge.DirectMessenger and
 // bridge.Deleter. Every message it keeps is also written to the log, which stands in for the messenger's screen.
 type chat struct {
-	log      *slog.Logger
+	log *slog.Logger
+	// idPrefix starts the ids of this process's messages, so that a restarted example never hands out an id that
+	// Muster still holds for a message of the previous run: Muster's edits and presses of old ids find nothing.
+	idPrefix string
 	channels map[string]bool
 	people   map[string]bridge.Person
 	private  bool
@@ -259,11 +264,11 @@ var (
 	_ bridge.Deleter         = (*chat)(nil)
 )
 
-var errNoMessage = bridge.GoneError("The message no longer exists.")
+var errNoMessage = bridge.GoneError("No message has this id.")
 
 func (c *chat) PostMessage(_ context.Context, bot string, in bridge.MessageInput) (bridge.MessagePosted, error) {
 	if !c.channels[in.ChannelId] {
-		return bridge.MessagePosted{}, bridge.ForbiddenError("The bot is not a member of this channel.")
+		return bridge.MessagePosted{}, bridge.ForbiddenError("The bot has not joined this channel.")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -310,7 +315,7 @@ func (c *chat) ReplyInThread(_ context.Context, bot, messageID string, in bridge
 
 func (c *chat) CheckChannel(_ context.Context, _, channelID string) (string, error) {
 	if !c.channels[channelID] {
-		return "", bridge.ForbiddenError("The bot is not a member of this channel.")
+		return "", bridge.ForbiddenError("The bot has not joined this channel.")
 	}
 	return channelID, nil
 }
@@ -345,7 +350,9 @@ func (c *chat) SendDirectMessage(_ context.Context, bot string, in bridge.Direct
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.lastDM++
-	id := "d" + strconv.Itoa(c.lastDM)
+	id := c.idPrefix + "-d" + strconv.Itoa(c.lastDM)
+	// The log is the person's screen here, so the body is logged: it carries the Account link code that the person
+	// must see. A real bridge never logs the body of a direct message; it may hold such a code or another secret.
 	c.log.Info("minimal: direct message sent", "bot", bot, "message_id", id, "person", in.UserExternalId,
 		"body", in.Body)
 	return bridge.DirectMessageSent{MessageId: id}, nil
@@ -412,10 +419,10 @@ func (c *chat) find(id string) *message {
 	return nil
 }
 
-// nextID is the id of a new message; c.mu is held.
+// nextID is the id of a new message, unique across restarts by the process's prefix; c.mu is held.
 func (c *chat) nextID() string {
 	c.last++
-	return "m" + strconv.Itoa(c.last)
+	return c.idPrefix + "-m" + strconv.Itoa(c.last)
 }
 
 // mentions is body with its Mention markers as the messenger shows them: @login with native mentions, else the name.

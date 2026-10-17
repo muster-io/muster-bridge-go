@@ -56,37 +56,53 @@ const (
 // operation is one operation of the protocol: how it is routed, when it is served, and what serves it — run, within
 // the common flow of claim, validation, messenger call, answer check and answer, or serve, which does it all.
 type operation struct {
-	id         string
-	method     string
-	path       string
-	status     int
-	idempotent bool
-	served     func(*Bridge) bool
-	run        func(*call) (any, error)
-	serve      func(*Bridge, *operation, http.ResponseWriter, *http.Request)
+	id     string
+	method string
+	path   string
+	status int
+	// asReplay, set for the operations with an Idempotency-Key, re-encodes a stored first answer with replayed true.
+	asReplay func(first []byte) ([]byte, error)
+	served   func(*Bridge) bool
+	run      func(*call) (any, error)
+	serve    func(*Bridge, *operation, http.ResponseWriter, *http.Request)
 }
 
 var operations = []*operation{
 	{id: opGetInfo, method: http.MethodGet, path: "/v1/info", status: http.StatusOK, serve: (*Bridge).getInfo},
-	{id: opPostMessage, method: http.MethodPost, path: "/v1/messages", status: http.StatusCreated, idempotent: true,
-		run: (*call).postMessage},
+	{id: opPostMessage, method: http.MethodPost, path: "/v1/messages", status: http.StatusCreated,
+		asReplay: replayOf(func(a *MessagePosted) { a.Replayed = true }), run: (*call).postMessage},
 	{id: opEditMessage, method: http.MethodPatch, path: "/v1/messages/{message_id}", status: http.StatusOK,
 		run: (*call).editMessage},
 	{id: opDeleteMessage, method: http.MethodDelete, path: "/v1/messages/{message_id}", status: http.StatusNoContent,
 		served: func(b *Bridge) bool { return b.info.Capabilities.Delete != nil }, run: (*call).deleteMessage},
 	{id: opReplyInThread, method: http.MethodPost, path: "/v1/messages/{message_id}/thread-replies",
-		status: http.StatusCreated, idempotent: true, run: (*call).replyInThread},
+		status: http.StatusCreated, asReplay: replayOf(func(a *ThreadReplyPosted) { a.Replayed = true }),
+		run: (*call).replyInThread},
 	{id: opCheckChannel, method: http.MethodPost, path: "/v1/channels/{channel_id}/check", status: http.StatusOK,
 		run: (*call).checkChannel},
 	{id: opFindUsers, method: http.MethodGet, path: "/v1/users", status: http.StatusOK,
 		served: func(b *Bridge) bool { return b.info.UserLookup != InfoUserLookupNone }, run: (*call).findUsers},
 	{id: opSendDirectMessage, method: http.MethodPost, path: "/v1/direct-messages", status: http.StatusCreated,
-		idempotent: true, served: func(b *Bridge) bool { return b.info.Capabilities.DirectMessages != nil },
-		run: (*call).sendDirectMessage},
-	{id: opAnswerEvent, method: http.MethodPost, path: "/v1/answers", status: http.StatusOK, idempotent: true,
-		run: (*call).answerEvent},
+		asReplay: replayOf(func(a *DirectMessageSent) { a.Replayed = true }),
+		served:   func(b *Bridge) bool { return b.info.Capabilities.DirectMessages != nil },
+		run:      (*call).sendDirectMessage},
+	{id: opAnswerEvent, method: http.MethodPost, path: "/v1/answers", status: http.StatusOK,
+		asReplay: replayOf(func(a *AnswerShown) { a.Replayed = true }), run: (*call).answerEvent},
 	{id: opPollEvents, method: http.MethodGet, path: "/v1/events", status: http.StatusOK,
-		served: func(b *Bridge) bool { return b.offers(InfoEventDeliveryPoll) }, serve: (*Bridge).pollEvents},
+		served: func(b *Bridge) bool { return b.pollOffered }, serve: (*Bridge).pollEvents},
+}
+
+// replayOf makes the asReplay of an operation whose answer type is A: decode the stored first answer into an A, let
+// mark set its replayed member, encode it again.
+func replayOf[A any](mark func(*A)) func([]byte) ([]byte, error) {
+	return func(first []byte) ([]byte, error) {
+		var answer A
+		if err := json.Unmarshal(first, &answer); err != nil {
+			return nil, err
+		}
+		mark(&answer)
+		return json.Marshal(answer)
+	}
 }
 
 // protocol is the loaded api/bridge.yaml with the route of each operation, for kin-openapi's validation.
@@ -238,8 +254,8 @@ func (b *Bridge) recoverer(next http.Handler) http.Handler {
 	})
 }
 
-// authenticate finds the bot of the request's token, comparing its hash with every bot's in constant time, and
-// answers 401 when there is none.
+// authenticate puts the request under the bot whose token it presents, hashing the token and comparing the hash with
+// every bot's in constant time; a request that presents no bot's token is answered 401.
 func (b *Bridge) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bs := b.botOf(r.Header.Get("Authorization"))
@@ -293,6 +309,7 @@ type call struct {
 	note    *requestNote
 	body    []byte
 	key     string
+	claimID string
 	claimed bool
 	saved   bool
 }
@@ -305,7 +322,7 @@ func (r *refusal) Error() string { return r.e.Error() }
 func refuse(e *Error) error { return &refusal{e} }
 
 func (c *call) serve() {
-	if c.op.idempotent {
+	if c.op.asReplay != nil {
 		if !c.claim() {
 			return
 		}
@@ -326,8 +343,8 @@ func (c *call) serve() {
 func (c *call) claim() bool {
 	key := c.r.Header.Get("Idempotency-Key")
 	if !validKey(key) {
-		c.b.writeError(c.w, InvalidError("The Idempotency-Key header is missing or not 1 to 255 printable ASCII "+
-			"characters."))
+		c.b.writeError(c.w, InvalidError("Send an Idempotency-Key header of 1 to 255 visible ASCII characters "+
+			"(no spaces)."))
 		return false
 	}
 	now := c.b.clock.Now()
@@ -337,7 +354,7 @@ func (c *call) claim() bool {
 		c.fail(c.storeFailed(err))
 		return false
 	case claim.State == KeyAnswered:
-		c.replay(claim.Answer)
+		c.answerAgain(claim.Answer)
 		return false
 	case claim.State == KeyRunning:
 		c.b.writeError(c.w, TransientError("A request with this Idempotency-Key is still running."))
@@ -346,7 +363,7 @@ func (c *call) claim() bool {
 		c.fail(c.storeFailed(fmt.Errorf("ClaimKey returned the unknown state %d", claim.State)))
 		return false
 	}
-	c.key, c.claimed = key, true
+	c.key, c.claimID, c.claimed = key, claim.ID, true
 	c.ctx = context.WithValue(c.ctx, idempotencyKeyCtx{}, key)
 	return true
 }
@@ -363,23 +380,30 @@ func validKey(key string) bool {
 	return true
 }
 
-// replay answers the stored first result of a key, marked replayed, without reading the request.
-func (c *call) replay(a StoredAnswer) {
-	var members map[string]json.RawMessage
-	if err := json.Unmarshal(a.Body, &members); err != nil || members == nil {
-		c.fail(c.storeFailed(errors.New("the stored answer of the Idempotency-Key is not a JSON object")))
+// answerAgain sends the first answer of the key once more, flagged as replayed. The request's own body is never read:
+// a repeated key gets the first answer whatever it carries. A stored answer that no longer fits the operation is a
+// fault of the store.
+func (c *call) answerAgain(first StoredAnswer) {
+	body, err := c.op.asReplay(first.Body)
+	fault := "it is not the JSON of the operation's answer"
+	if err == nil {
+		fault = c.b.proto.checkAnswer(c.op.id, first.Status, body)
+	}
+	if fault != "" {
+		c.fail(c.storeFailed(fmt.Errorf("the first answer stored for the Idempotency-Key cannot be sent again: %s",
+			fault)))
 		return
 	}
-	members["replayed"] = json.RawMessage("true")
-	writeJSON(c.w, a.Status, "application/json", mustMarshal(members))
+	writeJSON(c.w, first.Status, "application/json", body)
 }
 
-// release frees the claimed key unless its answer was saved, so that a retry runs again; it runs on a panic too.
+// release frees the claimed key unless its answer was saved, so that a retry runs again; it runs on a panic too. The
+// store frees it only while this request's claim holds it.
 func (c *call) release() {
 	if !c.claimed || c.saved {
 		return
 	}
-	if err := c.b.store.ReleaseKey(context.WithoutCancel(c.ctx), c.bot, c.key); err != nil {
+	if err := c.b.store.ReleaseKey(context.WithoutCancel(c.ctx), c.bot, c.key, c.claimID); err != nil {
 		c.log(slog.LevelError, "bridge: cannot release an Idempotency-Key", slog.String("error",
 			c.b.redact(err.Error())))
 	}
@@ -391,9 +415,9 @@ func (c *call) read() bool {
 	if c.r.Body != nil {
 		var err error
 		if body, err = io.ReadAll(http.MaxBytesReader(c.w, c.r.Body, maxRequestBytes)); err != nil {
-			detail := "The request body could not be read."
+			detail := "Reading the request body failed."
 			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-				detail = "The request body is larger than 1 MiB."
+				detail = "The request body exceeds 1 MiB, the most this bridge reads."
 			}
 			c.b.writeError(c.w, InvalidError(detail))
 			return false
@@ -482,6 +506,11 @@ func (c *call) fail(err error) {
 			c.b.writeError(c.w, TransientError(detailMessenger))
 			return
 		}
+		if e.Reason != "" && (e.Reason != ReasonEditWindowClosed || class != ClassGone) {
+			c.log(slog.LevelError, "bridge: the messenger gave a reason the protocol does not define for this answer; "+
+				"it is not sent", slog.String("class", string(class)),
+				slog.String("reason", c.b.redact(string(e.Reason), c.note.secrets...)))
+		}
 		if class != e.Class {
 			mapped := *e
 			mapped.Class = class
@@ -524,7 +553,7 @@ func (c *call) answer(v any) {
 	}
 	if c.claimed {
 		until := c.b.clock.Now().Add(keyRetention)
-		err := c.b.store.SaveKey(context.WithoutCancel(c.ctx), c.bot, c.key,
+		err := c.b.store.SaveKey(context.WithoutCancel(c.ctx), c.bot, c.key, c.claimID,
 			StoredAnswer{Status: c.op.status, Body: body}, until)
 		if err != nil {
 			c.log(slog.LevelError, "bridge: cannot store the answer of an Idempotency-Key", slog.String("error",

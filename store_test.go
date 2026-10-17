@@ -33,12 +33,12 @@ func mustClaim(t *testing.T, s Store, bot, key string, now time.Time, want KeySt
 
 func TestMemoryStoreClaimAndSave(t *testing.T) {
 	s, now := NewMemoryStore(), testStart
-	mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	c := mustClaim(t, s, "main", "k1", now, KeyClaimed)
 	answer := StoredAnswer{Status: 201, Body: []byte(`{"message_id":"m1","replayed":false}`)}
-	if err := s.SaveKey(bg, "main", "k1", answer, now.Add(keyRetention)); err != nil {
+	if err := s.SaveKey(bg, "main", "k1", c.ID, answer, now.Add(keyRetention)); err != nil {
 		t.Fatal(err)
 	}
-	c := mustClaim(t, s, "main", "k1", now.Add(time.Hour), KeyAnswered)
+	c = mustClaim(t, s, "main", "k1", now.Add(time.Hour), KeyAnswered)
 	if c.Answer.Status != 201 || string(c.Answer.Body) != string(answer.Body) {
 		t.Fatalf("answer = %+v", c.Answer)
 	}
@@ -52,33 +52,73 @@ func TestMemoryStoreRunningClaim(t *testing.T) {
 
 func TestMemoryStoreClaimLeaseExpires(t *testing.T) {
 	s, now := NewMemoryStore(), testStart
-	mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	first := mustClaim(t, s, "main", "k1", now, KeyClaimed)
 	mustClaim(t, s, "main", "k1", now.Add(keyClaimTTL-time.Nanosecond), KeyRunning)
-	mustClaim(t, s, "main", "k1", now.Add(keyClaimTTL), KeyClaimed)
+	if again := mustClaim(t, s, "main", "k1", now.Add(keyClaimTTL), KeyClaimed); again.ID == first.ID {
+		t.Fatalf("the claim after the lease has the first one's ID %q", again.ID)
+	}
 }
 
 func TestMemoryStoreReleaseKeepsAnswer(t *testing.T) {
 	s, now := NewMemoryStore(), testStart
-	mustClaim(t, s, "main", "k1", now, KeyClaimed)
-	if err := s.ReleaseKey(bg, "main", "k1"); err != nil {
+	c := mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	if err := s.ReleaseKey(bg, "main", "k1", c.ID); err != nil {
 		t.Fatal(err)
 	}
-	mustClaim(t, s, "main", "k1", now, KeyClaimed)
-	if err := s.SaveKey(bg, "main", "k1", StoredAnswer{Status: 200, Body: []byte("{}")}, now.Add(time.Hour)); err != nil {
+	c = mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	if err := s.SaveKey(bg, "main", "k1", c.ID, StoredAnswer{Status: 200, Body: []byte("{}")}, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseKey(bg, "main", "k1"); err != nil {
+	if err := s.ReleaseKey(bg, "main", "k1", c.ID); err != nil {
 		t.Fatal(err)
 	}
 	mustClaim(t, s, "main", "k1", now, KeyAnswered)
-	if err := s.ReleaseKey(bg, "main", "never-claimed"); err != nil {
+	if err := s.ReleaseKey(bg, "main", "never-claimed", "1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A request that outlives its claim neither frees nor overwrites the claim of the request that took the key over.
+func TestMemoryStoreStaleClaimLeavesTheNewOne(t *testing.T) {
+	s, now := NewMemoryStore(), testStart
+	stale := mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	later := now.Add(keyClaimTTL)
+	fresh := mustClaim(t, s, "main", "k1", later, KeyClaimed)
+	if err := s.ReleaseKey(bg, "main", "k1", stale.ID); err != nil {
+		t.Fatal(err)
+	}
+	mustClaim(t, s, "main", "k1", later, KeyRunning)
+	if err := s.SaveKey(bg, "main", "k1", stale.ID, StoredAnswer{Status: 201, Body: []byte(`{"stale":true}`)},
+		later.Add(keyRetention)); err != nil {
+		t.Fatal(err)
+	}
+	mustClaim(t, s, "main", "k1", later, KeyRunning)
+	if err := s.SaveKey(bg, "main", "k1", fresh.ID, StoredAnswer{Status: 201, Body: []byte(`{"fresh":true}`)},
+		later.Add(keyRetention)); err != nil {
+		t.Fatal(err)
+	}
+	if c := mustClaim(t, s, "main", "k1", later, KeyAnswered); string(c.Answer.Body) != `{"fresh":true}` {
+		t.Fatalf("the key answers %s", c.Answer.Body)
+	}
+}
+
+func TestMemoryStoreFirstAnswerStays(t *testing.T) {
+	s, now := NewMemoryStore(), testStart
+	c := mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	for _, body := range []string{`{"n":1}`, `{"n":2}`} {
+		if err := s.SaveKey(bg, "main", "k1", c.ID, StoredAnswer{Status: 201, Body: []byte(body)},
+			now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mustClaim(t, s, "main", "k1", now, KeyAnswered); string(got.Answer.Body) != `{"n":1}` {
+		t.Fatalf("the key answers %s", got.Answer.Body)
 	}
 }
 
 func TestMemoryStoreSaveWithoutClaim(t *testing.T) {
 	s, now := NewMemoryStore(), testStart
-	if err := s.SaveKey(bg, "main", "k1", StoredAnswer{Status: 200, Body: []byte("{}")}, now.Add(time.Hour)); err != nil {
+	if err := s.SaveKey(bg, "main", "k1", "", StoredAnswer{Status: 200, Body: []byte("{}")}, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	mustClaim(t, s, "main", "k1", now, KeyAnswered)
@@ -86,8 +126,8 @@ func TestMemoryStoreSaveWithoutClaim(t *testing.T) {
 
 func TestMemoryStoreKeysPerBot(t *testing.T) {
 	s, now := NewMemoryStore(), testStart
-	mustClaim(t, s, "main", "k1", now, KeyClaimed)
-	if err := s.SaveKey(bg, "main", "k1", StoredAnswer{Status: 201, Body: []byte("{}")}, now.Add(time.Hour)); err != nil {
+	c := mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	if err := s.SaveKey(bg, "main", "k1", c.ID, StoredAnswer{Status: 201, Body: []byte("{}")}, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	mustClaim(t, s, "other", "k1", now, KeyClaimed)
@@ -95,8 +135,8 @@ func TestMemoryStoreKeysPerBot(t *testing.T) {
 
 func TestMemoryStoreKeysExpireAfter24Hours(t *testing.T) {
 	s, now := NewMemoryStore(), testStart
-	mustClaim(t, s, "main", "k1", now, KeyClaimed)
-	if err := s.SaveKey(bg, "main", "k1", StoredAnswer{Status: 201, Body: []byte("{}")}, now.Add(keyRetention)); err != nil {
+	c := mustClaim(t, s, "main", "k1", now, KeyClaimed)
+	if err := s.SaveKey(bg, "main", "k1", c.ID, StoredAnswer{Status: 201, Body: []byte("{}")}, now.Add(keyRetention)); err != nil {
 		t.Fatal(err)
 	}
 	mustClaim(t, s, "main", "k1", now.Add(keyRetention-time.Nanosecond), KeyAnswered)
@@ -152,23 +192,23 @@ func TestMemoryStoreEventsAfter(t *testing.T) {
 		}
 	}
 	first, c1, err := s.EventsAfter(bg, "main", "", 2, now)
-	if err != nil || ids(first) != "e0 e1" {
-		t.Fatalf("first page %s, %v", ids(first), err)
+	if err != nil || eventIDs(first) != "e0 e1" {
+		t.Fatalf("first page %s, %v", eventIDs(first), err)
 	}
 	if first[0].Chat != "c-e0" || first[0].Type != EventTypePress {
 		t.Fatalf("event %+v", first[0])
 	}
 	second, c2, _ := s.EventsAfter(bg, "main", c1, 10, now)
-	if ids(second) != "e2 e3 e4" {
-		t.Fatalf("second page %s", ids(second))
+	if eventIDs(second) != "e2 e3 e4" {
+		t.Fatalf("second page %s", eventIDs(second))
 	}
 	none, c3, _ := s.EventsAfter(bg, "main", c2, 10, now)
 	if len(none) != 0 || c3 != c2 {
-		t.Fatalf("after the end: %s %q, want the same cursor %q", ids(none), c3, c2)
+		t.Fatalf("after the end: %s %q, want the same cursor %q", eventIDs(none), c3, c2)
 	}
 	fromHead, _, _ := s.EventsAfter(bg, "main", head, 0, now)
-	if ids(fromHead) != "e0 e1 e2 e3 e4" {
-		t.Fatalf("after the head cursor of the empty queue: %s", ids(fromHead))
+	if eventIDs(fromHead) != "e0 e1 e2 e3 e4" {
+		t.Fatalf("after the head cursor of the empty queue: %s", eventIDs(fromHead))
 	}
 	all, _, _ := s.EventsAfter(bg, "main", "", 0, now)
 	if len(all) != 5 {
@@ -176,7 +216,7 @@ func TestMemoryStoreEventsAfter(t *testing.T) {
 	}
 }
 
-func ids(events []StoredEvent) string {
+func eventIDs(events []StoredEvent) string {
 	var out []string
 	for _, e := range events {
 		out = append(out, e.ID)
@@ -215,8 +255,8 @@ func TestMemoryStoreEventsExpire(t *testing.T) {
 	}
 	later := now.Add(30 * time.Minute)
 	events, _, _ := s.EventsAfter(bg, "main", "", 10, later)
-	if ids(events) != "old new" {
-		t.Fatalf("after 30 minutes: %s", ids(events))
+	if eventIDs(events) != "old new" {
+		t.Fatalf("after 30 minutes: %s", eventIDs(events))
 	}
 	if _, ok, _ := s.FindEvent(bg, "main", "short", later); ok {
 		t.Fatal("an expired event in the middle of the queue was found")
@@ -225,8 +265,8 @@ func TestMemoryStoreEventsExpire(t *testing.T) {
 		t.Fatal("the id of an expired event was refused")
 	}
 	events, _, _ = s.EventsAfter(bg, "main", "", 10, now.Add(90*time.Minute))
-	if ids(events) != "new short" {
-		t.Fatalf("after 90 minutes: %s", ids(events))
+	if eventIDs(events) != "new short" {
+		t.Fatalf("after 90 minutes: %s", eventIDs(events))
 	}
 	if _, ok, _ := s.FindEvent(bg, "main", "short", now.Add(90*time.Minute)); !ok {
 		t.Fatal("the event queued again was not found")

@@ -18,12 +18,15 @@ import (
 )
 
 const (
-	pushTimeout      = 10 * time.Second
-	pushRetryFor     = time.Hour
-	pushBackoffFirst = time.Second
-	pushBackoffMax   = 5 * time.Minute
-	pushDrainBytes   = 64 << 10
-	userAgent        = "muster-bridge-go"
+	// attemptTimeout bounds one post of an event to the callback.
+	attemptTimeout = 10 * time.Second
+	// retryWindow is how long an event is retried before the pusher moves on and leaves it to polling.
+	retryWindow = time.Hour
+	// firstBackoff is the wait after the first failed attempt; each further wait doubles, up to maxBackoff.
+	firstBackoff   = time.Second
+	maxBackoff     = 5 * time.Minute
+	pushDrainBytes = 64 << 10
+	userAgent      = "muster-bridge-go"
 )
 
 // newPushClient is the HTTP client of the pushes: the proxy of the environment, as any Go client, and no redirects,
@@ -35,24 +38,21 @@ func newPushClient() *http.Client {
 	}
 	return &http.Client{
 		Transport: transport.Clone(),
-		Timeout:   pushTimeout + 5*time.Second,
+		Timeout:   attemptTimeout + 5*time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 }
 
-// startPusher starts the bot's pusher unless it runs, and reports whether it started it; b.mu is held.
-func (b *Bridge) startPusher(bs *botState) bool {
-	if bs.pushing || b.closed {
+// launchPusher runs the bot's pusher in its own goroutine, unless one already runs or the bridge is closed, and
+// reports whether it launched one; b.mu is held. A pusher lives until Close.
+func (b *Bridge) launchPusher(bs *botState) bool {
+	if bs.pusherRunning || b.closed {
 		return false
 	}
-	bs.pushing = true
-	b.pushers.Add(1)
-	go func() {
-		defer b.pushers.Done()
-		b.push(bs)
-	}()
+	bs.pusherRunning = true
+	b.pusherGroup.Go(func() { b.runPusher(bs) })
 	return true
 }
 
@@ -62,8 +62,8 @@ func (bs *botState) pushTarget() *pushTarget {
 	return bs.target
 }
 
-// push posts the bot's events to its target, one at a time and in order, from the oldest kept, until Close.
-func (b *Bridge) push(bs *botState) {
+// runPusher posts the bot's events to its target, one at a time and in order, from the oldest kept, until Close.
+func (b *Bridge) runPusher(bs *botState) {
 	ctx := b.ctx
 	cursor := ""
 	for ctx.Err() == nil {
@@ -75,7 +75,7 @@ func (b *Bridge) push(bs *botState) {
 			}
 			continue
 		}
-		changed := bs.changes()
+		arrived := bs.eventSignal()
 		events, next, err := b.store.EventsAfter(ctx, bs.name, cursor, 1, b.clock.Now())
 		switch {
 		case errors.Is(err, ErrUnknownCursor) && cursor != "":
@@ -85,11 +85,11 @@ func (b *Bridge) push(bs *botState) {
 		case err != nil:
 			b.log.LogAttrs(ctx, slog.LevelError, "bridge: the store failed", slog.String("operation", "push"),
 				slog.String("bot", bs.name), slog.String("error", b.redact(err.Error())))
-			b.wait(ctx, bs, pushBackoffFirst)
+			b.wait(ctx, bs, firstBackoff)
 		case len(events) == 0:
 			cursor = next
 			select {
-			case <-changed:
+			case <-arrived:
 			case <-bs.retarget:
 			case <-ctx.Done():
 			}
@@ -114,11 +114,11 @@ func (b *Bridge) wait(ctx context.Context, bs *botState, d time.Duration) bool {
 	return false
 }
 
-// deliver pushes ev until Muster acknowledges or drops it, or for at least pushRetryFor, with exponential back-off
+// deliver pushes ev until Muster acknowledges or drops it, or for at least retryWindow, with exponential back-off
 // under the same webhook-id. It reports false when it stopped without an outcome: no target any more, or Close.
 func (b *Bridge) deliver(ctx context.Context, bs *botState, ev StoredEvent) bool {
 	first := b.clock.Now()
-	delay := pushBackoffFirst
+	delay := firstBackoff
 	attempt := 1
 	for {
 		target := bs.pushTarget()
@@ -137,7 +137,7 @@ func (b *Bridge) deliver(ctx context.Context, bs *botState, ev StoredEvent) bool
 				slog.String("bot", bs.name), slog.String("event_id", ev.ID))
 			return true
 		}
-		if b.clock.Now().Sub(first) >= pushRetryFor {
+		if b.clock.Now().Sub(first) >= retryWindow {
 			b.log.LogAttrs(ctx, slog.LevelWarn, "bridge: gave up pushing an event, it stays for polling",
 				slog.String("bot", bs.name), slog.String("event_id", ev.ID), slog.Int("attempts", attempt))
 			return true
@@ -156,20 +156,20 @@ func (b *Bridge) deliver(ctx context.Context, bs *botState, ev StoredEvent) bool
 			if ctx.Err() != nil {
 				return false
 			}
-			first, delay, attempt = b.clock.Now(), pushBackoffFirst, 1
+			first, delay, attempt = b.clock.Now(), firstBackoff, 1
 			continue
 		}
-		delay = min(2*delay, pushBackoffMax)
+		delay = min(2*delay, maxBackoff)
 		attempt++
 	}
 }
 
-// attempt posts ev once, signed as Standard Webhooks specifies, and returns the answer's status. The clock bounds it
-// with pushTimeout.
+// attempt posts ev once, signed as Standard Webhooks specifies, and returns the answer's status. A timer of the
+// library's clock cancels it after attemptTimeout.
 func (b *Bridge) attempt(ctx context.Context, target *pushTarget, ev StoredEvent) (int, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	timeout, stop := b.clock.Timer(pushTimeout)
+	timeout, stop := b.clock.Timer(attemptTimeout)
 	defer stop()
 	done := make(chan struct{})
 	defer close(done)
@@ -180,29 +180,41 @@ func (b *Bridge) attempt(ctx context.Context, target *pushTarget, ev StoredEvent
 		case <-done:
 		}
 	}()
-	timestamp := strconv.FormatInt(b.clock.Now().Unix(), 10)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.url, bytes.NewReader(ev.Body))
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("webhook-id", ev.ID)
-	req.Header.Set("webhook-timestamp", timestamp)
-	req.Header.Set("webhook-signature", "v1,"+sign(target.key, ev.ID, timestamp, ev.Body))
+	sentAt := strconv.FormatInt(b.clock.Now().Unix(), 10)
+	for name, value := range map[string]string{
+		"Content-Type":      "application/json",
+		"User-Agent":        userAgent,
+		"webhook-id":        ev.ID,
+		"webhook-timestamp": sentAt,
+		"webhook-signature": webhookSignature(target.key, ev.ID, sentAt, ev.Body),
+	} {
+		req.Header.Set(name, value)
+	}
 	resp, err := b.client.Do(req)
 	if err != nil {
 		return 0, err
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, pushDrainBytes))
-	_ = resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	// Only the status counts; reading a little of the body lets the client reuse the connection.
+	_, _ = io.CopyN(io.Discard, resp.Body, pushDrainBytes)
 	return resp.StatusCode, nil
 }
 
-// sign is the base64 HMAC-SHA256 of "<id>.<timestamp>.<body>" with the key.
-func sign(key []byte, id, timestamp string, body []byte) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(id + "." + timestamp + "."))
-	mac.Write(body)
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+// webhookSignature is the webhook-signature header of a Standard Webhooks message: the version "v1", a comma, and
+// the standard base64 of the HMAC-SHA256 that secretKey makes of the signed content, which is the message id, the
+// timestamp and the payload, separated by full stops.
+func webhookSignature(secretKey []byte, msgID, sentAt string, payload []byte) string {
+	signed := make([]byte, 0, len(msgID)+len(sentAt)+len(payload)+2)
+	signed = append(signed, msgID...)
+	signed = append(signed, '.')
+	signed = append(signed, sentAt...)
+	signed = append(signed, '.')
+	signed = append(signed, payload...)
+	h := hmac.New(sha256.New, secretKey)
+	_, _ = h.Write(signed)
+	return "v1," + base64.StdEncoding.EncodeToString(h.Sum(nil))
 }

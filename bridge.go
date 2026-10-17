@@ -4,6 +4,7 @@
 package bridge
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -37,7 +39,7 @@ type Messenger interface {
 	// CheckChannel posts nothing and returns the channel's name as people see it, or a forbidden *Error when the bot
 	// cannot post, edit and reply there.
 	CheckChannel(ctx context.Context, bot, channelID string) (string, error)
-	// AnswerEvent shows text to the person behind the event, which the bridge reported, and returns where it was shown.
+	// AnswerEvent shows text to whoever caused the event, which the bridge reported, and returns where it was shown.
 	AnswerEvent(ctx context.Context, bot string, event ReportedEvent, text string) (AnswerShownShownAs, error)
 }
 
@@ -77,7 +79,7 @@ type Config struct {
 	UserLookup InfoUserLookup
 	// EventDelivery are the event delivery modes the bridge offers; nil is both, poll and push.
 	EventDelivery []InfoEventDelivery
-	// LinkURLTemplate is an http or https link with {token} that hands the bot an Account link token; "" for none.
+	// LinkURLTemplate is an http or https link with {token}, which opens the bot with an Account link token; "" for none.
 	LinkURLTemplate string
 	// Store keeps the Idempotency-Keys and the events; nil is NewMemoryStore().
 	Store Store
@@ -100,9 +102,9 @@ type Bot struct {
 
 // PushTarget is where the events of a bot are pushed, as the Bridge Connection in Muster shows it.
 type PushTarget struct {
-	// URL is the callback address: an absolute http or https URL.
+	// URL is the callback address of the Bridge Connection, with the http or https scheme and a host.
 	URL string
-	// Secret is the push secret: whsec_ followed by standard base64.
+	// Secret is the push secret as the Bridge Connection shows it: whsec_ and the base64 of the signing key.
 	Secret string
 }
 
@@ -119,34 +121,37 @@ type Bridge struct {
 	proto     *protocol
 	info      Info
 	infoBody  []byte
-	bots      map[string]*botState
-	botList   []*botState
-	handler   http.Handler
-	client    *http.Client
+	// pollOffered and pushOffered are the event delivery modes of info.
+	pollOffered bool
+	pushOffered bool
+	bots        map[string]*botState
+	botList     []*botState
+	handler     http.Handler
+	client      *http.Client
 
 	redactor atomic.Pointer[strings.Replacer]
 	tokens   []string
 
-	mu      sync.Mutex
-	secrets []string
-	closed  bool
-	ctx     context.Context
-	cancel  context.CancelFunc
-	pushers sync.WaitGroup
+	mu          sync.Mutex
+	secrets     []string
+	closed      bool
+	ctx         context.Context
+	cancel      context.CancelFunc
+	pusherGroup sync.WaitGroup
 }
 
 type botState struct {
 	name      string
 	tokenHash [sha256.Size]byte
 
-	mu       sync.Mutex
-	changed  chan struct{}
-	target   *pushTarget
-	retarget chan struct{}
-	pushing  bool
+	mu            sync.Mutex
+	newEvent      chan struct{}
+	target        *pushTarget
+	retarget      chan struct{}
+	pusherRunning bool
 }
 
-// pushTarget is a checked PushTarget with its decoded key.
+// pushTarget is a PushTarget that passed its checks, holding the HMAC key the secret encodes.
 type pushTarget struct {
 	url string
 	key []byte
@@ -161,7 +166,8 @@ var (
 
 const (
 	maxBodyLengthCap = 100000
-	pushSecretPrefix = "whsec_"
+	// whsecPrefix opens every push secret; the signing key follows it, in base64.
+	whsecPrefix = "whsec_"
 )
 
 // New checks cfg and returns the bridge that serves it with m. It names every problem it finds: a bot without a name
@@ -208,6 +214,14 @@ func New(cfg Config, m Messenger) (*Bridge, error) {
 		bots:      make(map[string]*botState, len(cfg.Bots)),
 	}
 	_ = json.Unmarshal(infoBody, &b.info) // a deep copy, so that the caller's Config cannot change the bridge
+	for _, mode := range b.info.EventDelivery {
+		switch mode {
+		case InfoEventDeliveryPoll:
+			b.pollOffered = true
+		case InfoEventDeliveryPush:
+			b.pushOffered = true
+		}
+	}
 	b.finder, _ = m.(UserFinder)
 	b.dm, _ = m.(DirectMessenger)
 	b.deleter, _ = m.(Deleter)
@@ -226,13 +240,13 @@ func New(cfg Config, m Messenger) (*Bridge, error) {
 	b.client = newPushClient()
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	for _, bot := range cfg.Bots {
-		bs := &botState{name: bot.Name, tokenHash: sha256.Sum256([]byte(bot.Token)), changed: make(chan struct{}),
+		bs := &botState{name: bot.Name, tokenHash: sha256.Sum256([]byte(bot.Token)), newEvent: make(chan struct{}),
 			retarget: make(chan struct{}, 1)}
 		b.bots[bot.Name] = bs
 		b.botList = append(b.botList, bs)
 		b.tokens = append(b.tokens, bot.Token)
 		if bot.Push != nil {
-			bs.target, _ = checkPushTarget(bot.Push) // checked above
+			bs.target, _ = parsePushTarget(bot.Push) // checkBots accepted it
 			b.secrets = append(b.secrets, bot.Push.Secret)
 		}
 	}
@@ -241,7 +255,7 @@ func New(cfg Config, m Messenger) (*Bridge, error) {
 	b.mu.Lock()
 	for _, bs := range b.botList {
 		if bs.target != nil {
-			b.startPusher(bs)
+			b.launchPusher(bs)
 		}
 	}
 	b.mu.Unlock()
@@ -252,7 +266,8 @@ func New(cfg Config, m Messenger) (*Bridge, error) {
 // with http.StripPrefix.
 func (b *Bridge) Handler() http.Handler { return b.handler }
 
-// SetPush sets where the events of the bot are pushed, starting with the oldest event kept; nil stops pushing.
+// SetPush sets where the events of the bot are pushed; nil stops pushing. A pusher that this call starts begins with
+// the oldest event kept; a pusher that already runs continues where it was, now towards the new target.
 func (b *Bridge) SetPush(bot string, target *PushTarget) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -265,20 +280,22 @@ func (b *Bridge) SetPush(bot string, target *PushTarget) error {
 	}
 	var t *pushTarget
 	if target != nil {
-		if !slices.Contains(b.info.EventDelivery, InfoEventDeliveryPush) {
+		if !b.pushOffered {
 			return errors.New("bridge: event_delivery does not offer push")
 		}
 		var problems []string
-		if t, problems = checkPushTarget(target); len(problems) > 0 {
-			return fmt.Errorf("bridge: the push target %s", strings.Join(problems, "; "))
+		if t, problems = parsePushTarget(target); len(problems) > 0 {
+			return fmt.Errorf("bridge: the push target: %s", strings.Join(problems, "; "))
 		}
-		b.secrets = append(b.secrets, target.Secret)
-		b.rebuildRedactor()
+		if !slices.Contains(b.secrets, target.Secret) {
+			b.secrets = append(b.secrets, target.Secret)
+			b.rebuildRedactor()
+		}
 	}
 	bs.mu.Lock()
 	bs.target = t
 	bs.mu.Unlock()
-	if t != nil && b.startPusher(bs) || !bs.pushing {
+	if t != nil && b.launchPusher(bs) || !bs.pusherRunning {
 		return nil
 	}
 	select {
@@ -297,7 +314,7 @@ func (b *Bridge) Close(ctx context.Context) error {
 	b.cancel()
 	done := make(chan struct{})
 	go func() {
-		b.pushers.Wait()
+		b.pusherGroup.Wait()
 		b.client.CloseIdleConnections()
 		close(done)
 	}()
@@ -369,29 +386,48 @@ func checkBots(cfg Config) []error {
 		if !pushOffered {
 			errs = append(errs, fmt.Errorf("bridge: bots[%d].push is set, but event_delivery does not offer push", i))
 		}
-		if _, problems := checkPushTarget(bot.Push); len(problems) > 0 {
-			errs = append(errs, fmt.Errorf("bridge: bots[%d].push %s", i, strings.Join(problems, "; ")))
+		if _, problems := parsePushTarget(bot.Push); len(problems) > 0 {
+			errs = append(errs, fmt.Errorf("bridge: bots[%d].push: %s", i, strings.Join(problems, "; ")))
 		}
 	}
 	return errs
 }
 
-// checkPushTarget is the target with its decoded key, or what is wrong with it, never with the secret.
-func checkPushTarget(t *PushTarget) (*pushTarget, []string) {
-	var problems []string
-	u, err := url.Parse(t.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-		problems = append(problems, "url is not an absolute http or https URL without user information")
+// parsePushTarget turns a PushTarget into the URL and key a pusher uses. When it cannot, it lists the faults; a fault
+// never quotes the secret.
+func parsePushTarget(t *PushTarget) (*pushTarget, []string) {
+	var faults []string
+	if !callbackURLUsable(t.URL) {
+		faults = append(faults, "the url needs the http or https scheme, a host and no user information")
 	}
-	rest, ok := strings.CutPrefix(t.Secret, pushSecretPrefix)
-	key, err := base64.StdEncoding.DecodeString(rest)
-	if !ok || err != nil || len(key) == 0 {
-		problems = append(problems, "secret is not whsec_ followed by standard base64")
+	key, ok := secretKey(t.Secret)
+	if !ok {
+		faults = append(faults, "the secret needs the whsec_ prefix and then a non-empty key in standard base64")
 	}
-	if len(problems) > 0 {
-		return nil, problems
+	if faults != nil {
+		return nil, faults
 	}
 	return &pushTarget{url: t.URL, key: key}, nil
+}
+
+// callbackURLUsable reports whether raw is a URL a pusher can post to: http or https, with a host and without
+// credentials in it.
+func callbackURLUsable(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
+}
+
+// secretKey decodes the HMAC key of a push secret: the bytes of the base64 text after whsecPrefix. Standard Webhooks
+// asks for at least 24 random bytes; any non-empty key is taken, as Muster takes it.
+func secretKey(secret string) ([]byte, bool) {
+	if !strings.HasPrefix(secret, whsecPrefix) {
+		return nil, false
+	}
+	key, err := base64.StdEncoding.DecodeString(secret[len(whsecPrefix):])
+	return key, err == nil && len(key) > 0
 }
 
 func buildInfo(cfg Config) Info {
@@ -407,6 +443,12 @@ func buildInfo(cfg Config) Info {
 	if info.UserLookup == "" {
 		info.UserLookup = InfoUserLookupNone
 	}
+	if buttons := info.Capabilities.Buttons; buttons != nil && buttons.Styles == nil {
+		// info needs the list: nil is sent as [], no style shown as such. The copy leaves the caller's Config alone.
+		withStyles := *buttons
+		withStyles.Styles = []ButtonStyle{}
+		info.Capabilities.Buttons = &withStyles
+	}
 	if info.EventDelivery == nil {
 		info.EventDelivery = []InfoEventDelivery{InfoEventDeliveryPoll, InfoEventDeliveryPush}
 	}
@@ -417,52 +459,52 @@ func buildInfo(cfg Config) Info {
 	return info
 }
 
-// offers reports whether the bridge offers the event delivery mode.
-func (b *Bridge) offers(mode InfoEventDelivery) bool {
-	return slices.Contains(b.info.EventDelivery, mode)
-}
-
-// changes is closed by the next event queued for the bot.
-func (bs *botState) changes() <-chan struct{} {
+// eventSignal returns the channel that the bot's next queued event closes. A waiter takes it before it reads the
+// store, so that an event queued in between still wakes it.
+func (bs *botState) eventSignal() <-chan struct{} {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
-	return bs.changed
+	return bs.newEvent
 }
 
-func (bs *botState) notify() {
+// signalEvent wakes everyone who took the current signal and arms a new one for the waiters after them.
+func (bs *botState) signalEvent() {
 	bs.mu.Lock()
-	defer bs.mu.Unlock()
-	close(bs.changed)
-	bs.changed = make(chan struct{})
+	fired := bs.newEvent
+	bs.newEvent = make(chan struct{})
+	bs.mu.Unlock()
+	close(fired)
 }
 
-// rebuildRedactor makes the replacer of every token and push secret, in the forms a text may carry them, the longer
-// first; b.mu is held, or b is not shared yet.
+// rebuildRedactor prepares the replacement of every bot token and push secret by [redacted]. A secret can reach a log
+// line escaped, as part of a URL path or query, so each escaping is replaced as well; longer strings are tried first,
+// so that a secret inside a longer one never spoils the longer one's replacement. b.mu is held, or b is not shared
+// yet.
 func (b *Bridge) rebuildRedactor() {
-	var forms []string
-	add := func(s string) {
-		if s == "" {
+	variants := map[string]bool{}
+	note := func(secret string) {
+		if secret == "" {
 			return
 		}
-		for _, f := range []string{s, url.PathEscape(s), url.QueryEscape(s)} {
-			if !slices.Contains(forms, f) {
-				forms = append(forms, f)
-			}
-		}
+		variants[secret] = true
+		variants[url.PathEscape(secret)] = true
+		variants[url.QueryEscape(secret)] = true
 	}
-	for _, t := range b.tokens {
-		add(t)
+	for _, token := range b.tokens {
+		note(token)
 	}
-	for _, s := range b.secrets {
-		add(s)
-		add(strings.TrimPrefix(s, pushSecretPrefix))
+	for _, secret := range b.secrets {
+		note(secret)
+		note(strings.TrimPrefix(secret, whsecPrefix))
 	}
-	slices.SortFunc(forms, func(x, y string) int { return len(y) - len(x) })
-	pairs := make([]string, 0, 2*len(forms))
-	for _, f := range forms {
-		pairs = append(pairs, f, "[redacted]")
+	ordered := slices.SortedFunc(maps.Keys(variants), func(x, y string) int {
+		return cmp.Or(cmp.Compare(len(y), len(x)), strings.Compare(x, y))
+	})
+	oldNew := make([]string, 0, 2*len(ordered))
+	for _, v := range ordered {
+		oldNew = append(oldNew, v, "[redacted]")
 	}
-	b.redactor.Store(strings.NewReplacer(pairs...))
+	b.redactor.Store(strings.NewReplacer(oldNew...))
 }
 
 // redact replaces the tokens, the push secrets and the extra secrets in s.
@@ -478,20 +520,20 @@ func (b *Bridge) redact(s string, extra ...string) string {
 	return b.redactor.Load().Replace(s)
 }
 
-// clock is the library's time: the real clock, or a test's.
+// clock is where the library reads the time and sets its timers: the system's, or a test's.
 type clock interface {
 	Now() time.Time
-	// Timer fires once after d; the func stops it.
-	Timer(d time.Duration) (<-chan time.Time, func())
+	// Timer delivers one value after d; the func cancels it and reports whether it had not fired yet.
+	Timer(d time.Duration) (<-chan time.Time, func() bool)
 }
 
 type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
-func (realClock) Timer(d time.Duration) (<-chan time.Time, func()) {
+func (realClock) Timer(d time.Duration) (<-chan time.Time, func() bool) {
 	t := time.NewTimer(d)
-	return t.C, func() { t.Stop() }
+	return t.C, t.Stop
 }
 
 func mustMarshal(v any) []byte {

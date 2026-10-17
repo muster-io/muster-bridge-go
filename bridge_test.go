@@ -4,7 +4,6 @@
 package bridge
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -44,23 +43,26 @@ func (c *fakeClock) Now() time.Time {
 	return c.now
 }
 
-func (c *fakeClock) Timer(d time.Duration) (<-chan time.Time, func()) {
+func (c *fakeClock) Timer(d time.Duration) (<-chan time.Time, func() bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	t := &fakeTimer{at: c.now.Add(d), d: d, ch: make(chan time.Time, 1)}
 	if d <= 0 {
 		t.ch <- c.now
-		return t.ch, func() {}
+		return t.ch, func() bool { return false }
 	}
 	c.timers = append(c.timers, t)
 	c.signal()
-	return t.ch, func() {
+	return t.ch, func() bool {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		if i := slices.Index(c.timers, t); i >= 0 {
-			c.timers = slices.Delete(c.timers, i, i+1)
-			c.signal()
+		i := slices.Index(c.timers, t)
+		if i < 0 {
+			return false
 		}
+		c.timers = slices.Delete(c.timers, i, i+1)
+		c.signal()
+		return true
 	}
 }
 
@@ -297,22 +299,24 @@ func (m *fakeMessenger) DeleteMessage(ctx context.Context, bot, id string) error
 // onlyMessenger has the methods of Messenger and no other.
 type onlyMessenger struct{ Messenger }
 
-// syncBuffer is a log destination that pushers and handlers write to at once.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+// logSink collects the log lines of a test bridge, which handlers and pushers write from their own goroutines.
+type logSink struct {
+	sync.Mutex
+	text strings.Builder
 }
 
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.Write(p)
+func (l *logSink) Write(line []byte) (int, error) {
+	l.Lock()
+	n, err := l.text.Write(line)
+	l.Unlock()
+	return n, err
 }
 
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.String()
+func (l *logSink) String() string {
+	l.Lock()
+	text := l.text.String()
+	l.Unlock()
+	return text
 }
 
 const (
@@ -353,9 +357,9 @@ func testConfig(clk *fakeClock, logs io.Writer) Config {
 }
 
 // newTestBridge is a bridge of two bots, main and other, with every feature, on a fake clock, logging into a buffer.
-func newTestBridge(t testing.TB, mutate func(*Config)) (*Bridge, *fakeMessenger, *fakeClock, *syncBuffer) {
+func newTestBridge(t testing.TB, mutate func(*Config)) (*Bridge, *fakeMessenger, *fakeClock, *logSink) {
 	t.Helper()
-	clk, logs, m := newFakeClock(), &syncBuffer{}, &fakeMessenger{}
+	clk, logs, m := newFakeClock(), &logSink{}, &fakeMessenger{}
 	cfg := testConfig(clk, logs)
 	if mutate != nil {
 		mutate(&cfg)
@@ -478,7 +482,7 @@ func TestNewInfoWithEveryMember(t *testing.T) {
 }
 
 func TestNewCopiesTheConfig(t *testing.T) {
-	clk, logs, m := newFakeClock(), &syncBuffer{}, &fakeMessenger{}
+	clk, logs, m := newFakeClock(), &logSink{}, &fakeMessenger{}
 	cfg := testConfig(clk, logs)
 	b, err := New(cfg, m)
 	if err != nil {
@@ -592,7 +596,6 @@ func TestNewRefusesInfoAgainstSpec(t *testing.T) {
 		}, "/capabilities/buttons/styles: duplicate items found"},
 		{"unknown style", func(c *Config) { c.Capabilities.Buttons.Styles = []ButtonStyle{"pink"} },
 			"/capabilities/buttons/styles/0: value is not one of the allowed values"},
-		{"nil styles", func(c *Config) { c.Capabilities.Buttons.Styles = nil }, "/capabilities/buttons/styles"},
 		{"delete max_age_seconds 0", func(c *Config) { c.Capabilities.Delete.MaxAgeSeconds = new(0) },
 			"/capabilities/delete/max_age_seconds: number must be at least 1"},
 		{"empty event_delivery", func(c *Config) { c.EventDelivery = []InfoEventDelivery{} },
@@ -622,6 +625,29 @@ func TestNewRefusesInfoAgainstSpec(t *testing.T) {
 	}
 }
 
+// The specification requires capabilities.buttons.styles; a Config without them offers no style shown as such.
+func TestNewDefaultsButtonStyles(t *testing.T) {
+	b, _, _, _ := newTestBridge(t, func(c *Config) {
+		c.Capabilities.Buttons = &Capabilities_Buttons{MaxPerMessage: 2, MaxPerRow: 2, DataMaxBytes: 64}
+	})
+	info := decodeJSON(t, do(t, b.Handler(), http.MethodGet, "/v1/info", tokenMain, nil, "").Body.Bytes())
+	buttons := info["capabilities"].(map[string]any)["buttons"].(map[string]any)
+	if styles, ok := buttons["styles"].([]any); !ok || len(styles) != 0 {
+		t.Fatalf("buttons = %v, want styles []", buttons)
+	}
+	cfg := Config{Name: "n", Version: "v", MessengerName: "m", Bots: []Bot{{Name: "main", Token: "t"}},
+		Limits: Limits{MaxBodyLength: 500}, Capabilities: Capabilities{Buttons: &Capabilities_Buttons{MaxPerMessage: 2,
+			MaxPerRow: 2, DataMaxBytes: 64}}, clock: newFakeClock()}
+	other, err := New(cfg, onlyMessenger{&fakeMessenger{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Close(context.Background()) }()
+	if cfg.Capabilities.Buttons.Styles != nil {
+		t.Fatal("New changed the caller's Capabilities_Buttons")
+	}
+}
+
 func TestNewRefusesPushTargets(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -629,20 +655,20 @@ func TestNewRefusesPushTargets(t *testing.T) {
 		want   string
 	}{
 		{"relative url", func(c *Config) { c.Bots[0].Push = &PushTarget{URL: "/callback", Secret: testSecret} },
-			"bots[0].push url is not an absolute http or https URL"},
+			"bots[0].push: the url needs the http or https scheme, a host and no user information"},
 		{"ftp url", func(c *Config) { c.Bots[0].Push = &PushTarget{URL: "ftp://muster/cb", Secret: testSecret} },
-			"bots[0].push url"},
+			"bots[0].push: the url"},
 		{"user info", func(c *Config) {
 			c.Bots[0].Push = &PushTarget{URL: "https://u:p@muster/cb", Secret: testSecret}
-		}, "bots[0].push url"},
+		}, "bots[0].push: the url"},
 		{"no prefix", func(c *Config) {
 			c.Bots[0].Push = &PushTarget{URL: "https://muster/cb", Secret: strings.TrimPrefix(testSecret, "whsec_")}
-		}, "bots[0].push secret is not whsec_ followed by standard base64"},
+		}, "bots[0].push: the secret needs the whsec_ prefix and then a non-empty key in standard base64"},
 		{"not base64", func(c *Config) {
 			c.Bots[0].Push = &PushTarget{URL: "https://muster/cb", Secret: "whsec_not base64!"}
-		}, "bots[0].push secret"},
+		}, "bots[0].push: the secret"},
 		{"empty key", func(c *Config) { c.Bots[0].Push = &PushTarget{URL: "https://muster/cb", Secret: "whsec_"} },
-			"bots[0].push secret"},
+			"bots[0].push: the secret"},
 		{"poll only", func(c *Config) {
 			c.EventDelivery = []InfoEventDelivery{InfoEventDeliveryPoll}
 			c.Bots[1].Push = &PushTarget{URL: "https://muster/cb", Secret: testSecret}

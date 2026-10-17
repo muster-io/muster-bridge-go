@@ -37,6 +37,9 @@
 // # Operations
 //
 // [Bridge.Handler] serves every operation under /v1/; mount it under a path prefix with [net/http.StripPrefix].
+// Serve it with an [net/http.Server] that has no WriteTimeout, or one above 75 seconds: pollEvents holds a request for
+// up to 60 seconds (Muster asks for 25 and waits 15 more), and a shorter WriteTimeout cuts such a poll off without an
+// answer, so that its events reach Muster only on a later poll. ReadHeaderTimeout and IdleTimeout are safe to set.
 // Each request carries one bot's token, compared in constant time with every bot's, and is that bot's: the Messenger
 // is called with the bot's name, and its Idempotency-Keys and events are its own. A missing or wrong token is 401.
 //
@@ -60,7 +63,9 @@
 // postMessage, replyInThread, sendDirectMessage and answerEvent carry an Idempotency-Key. The first successful answer
 // of a key is kept for 24 hours per bot and answered again, with replayed true, without calling the Messenger,
 // whatever the repeated body. A request whose key is still running is transient; a failed request keeps nothing, so
-// its retry runs again. [IdempotencyKeyFrom] gives the key to a Messenger whose messenger has idempotency of its own.
+// its retry runs again. A request holds its key for two minutes; a Messenger method should return when its ctx ends.
+// If one runs longer, a retry may claim the key and run as well, but the late request neither frees nor overwrites
+// the retry's claim. [IdempotencyKeyFrom] gives the key to a Messenger whose messenger has idempotency of its own.
 //
 // # Errors
 //

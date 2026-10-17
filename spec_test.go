@@ -148,12 +148,12 @@ type exchange struct {
 func TestRequestsAndAnswersMatchSpec(t *testing.T) {
 	id := eventIDOf("main", EventTypePress, "u1")
 	running := KeyClaim{State: KeyRunning}
-	forbidden := ForbiddenError("The bot is not a member of this channel.")
+	forbidden := ForbiddenError("The bot has not joined this channel.")
 	limited := RateLimitedError(1500*time.Millisecond, ProblemScopeBot, "Slow down.")
-	gone := GoneError("The message no longer exists.")
+	gone := GoneError("That message is gone.")
 	tooOld := GoneError("The message can no longer be edited.", ReasonEditWindowClosed)
 	invalid := InvalidError("This handle cannot be searched for.")
-	broken := errors.New("connection reset")
+	broken := errors.New("the messenger's socket broke")
 	replay := func(path, body string) func(*testing.T, *Bridge, *fakeMessenger, *failingStore) {
 		return func(t *testing.T, b *Bridge, _ *fakeMessenger, _ *failingStore) {
 			do(t, b.Handler(), http.MethodPost, path, tokenMain, key("k1"), body)
@@ -358,7 +358,7 @@ func TestInfoMatchesSpec(t *testing.T) {
 
 func TestPushesMatchSpec(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	ctx := context.Background()
 	for _, err := range []error{

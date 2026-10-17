@@ -48,11 +48,12 @@ type Press struct {
 	Chat string
 }
 
-// ThreadMessage is a person's message in the Thread of a message of the bot; never a message of the bot itself.
+// ThreadMessage is what a person wrote under a message of the bot, in its Thread; the bot's own replies are not
+// reported.
 type ThreadMessage struct {
 	// UpdateID is the messenger's own id of the update, "" when it has none.
 	UpdateID string
-	// MessageID is the message whose Thread it is in, the message_id of replyInThread; never the id of a reply.
+	// MessageID is the bot's message that owns the Thread, as replyInThread names it; never the id of a reply.
 	MessageID string
 	// ThreadRef is the Thread's thread_ref, "" for none.
 	ThreadRef string
@@ -76,7 +77,7 @@ type MessageDeleted struct {
 	At time.Time
 }
 
-// DirectMessage is a direct message a person sent the bot.
+// DirectMessage is a private message from a person to the bot.
 type DirectMessage struct {
 	// UpdateID is the messenger's own id of the update, "" when it has none.
 	UpdateID string
@@ -132,7 +133,7 @@ func (b *Bridge) Press(ctx context.Context, bot string, p Press) error {
 	if p.MessageID == "" {
 		return fmt.Errorf("%w: message_id is empty", ErrInvalidEvent)
 	}
-	ev := PressEvent{Type: string(EventTypePress), MessageId: p.MessageID, User: person(p.User), Data: p.Data}
+	ev := PressEvent{Type: string(EventTypePress), MessageId: p.MessageID, User: fitPerson(p.User), Data: p.Data}
 	return b.report(ctx, bot, EventTypePress, p.UpdateID, p.At, p.Chat, func(id string, at time.Time) any {
 		ev.Id, ev.OccurredAt = id, at
 		return ev
@@ -150,7 +151,7 @@ func (b *Bridge) ThreadMessage(ctx context.Context, bot string, m ThreadMessage)
 	if m.MessageID == "" {
 		return fmt.Errorf("%w: message_id is empty", ErrInvalidEvent)
 	}
-	ev := ThreadMessageEvent{Type: string(EventTypeThreadMessage), MessageId: m.MessageID, User: person(m.User),
+	ev := ThreadMessageEvent{Type: string(EventTypeThreadMessage), MessageId: m.MessageID, User: fitPerson(m.User),
 		Text: cutRunes(m.Text, maxThreadText)}
 	if m.ThreadRef != "" {
 		ref := m.ThreadRef
@@ -191,7 +192,7 @@ func (b *Bridge) DirectMessage(ctx context.Context, bot string, m DirectMessage)
 	if !ok {
 		return nil
 	}
-	ev := AccountLinkEvent{Type: string(EventTypeAccountLink), Token: token, User: person(m.User)}
+	ev := AccountLinkEvent{Type: string(EventTypeAccountLink), Token: token, User: fitPerson(m.User)}
 	return b.report(ctx, bot, EventTypeAccountLink, m.UpdateID, m.At, m.Chat, func(id string, at time.Time) any {
 		ev.Id, ev.OccurredAt = id, at
 		return ev
@@ -216,8 +217,8 @@ func accountLinkToken(text string) (string, bool) {
 	return t, true
 }
 
-// person is p fitted to the protocol: the display name cut to 200 characters, a handle longer than 320 dropped.
-func person(p Person) Person {
+// fitPerson is p fitted to the protocol: the display name cut to 200 characters, a handle longer than 320 dropped.
+func fitPerson(p Person) Person {
 	p.DisplayName = cutRunes(p.DisplayName, maxDisplayName)
 	if p.Handle != nil && utf8.RuneCountInString(*p.Handle) > maxHandle {
 		p.Handle = nil
@@ -225,7 +226,8 @@ func person(p Person) Person {
 	return p
 }
 
-// report gives the event its id and time, checks it against api/bridge.yaml and queues it for the bot.
+// report stamps the event with its id and time, validates it as an Event of the specification and queues it for the
+// bot, waking its long polls and its pusher.
 func (b *Bridge) report(ctx context.Context, bot string, t EventType, updateID string, at time.Time, chat string,
 	build func(id string, at time.Time) any,
 ) error {
@@ -251,7 +253,7 @@ func (b *Bridge) report(ctx context.Context, bot string, t EventType, updateID s
 		return fmt.Errorf("bridge: cannot queue the %s event: %w", t, err)
 	}
 	if queued {
-		b.bots[bot].notify()
+		b.bots[bot].signalEvent()
 	}
 	return nil
 }
@@ -302,13 +304,13 @@ func (b *Bridge) pollEvents(op *operation, w http.ResponseWriter, r *http.Reques
 	}
 	var timeout <-chan time.Time
 	if wait > 0 {
-		var stop func()
+		var stop func() bool
 		timeout, stop = b.clock.Timer(wait)
 		defer stop()
 	}
 	bs := b.bots[bot]
 	for {
-		changed := bs.changes()
+		arrived := bs.eventSignal()
 		events, next, err := b.store.EventsAfter(ctx, bot, cursor, pollBatch, b.clock.Now())
 		switch {
 		case errors.Is(err, ErrUnknownCursor):
@@ -324,7 +326,7 @@ func (b *Bridge) pollEvents(op *operation, w http.ResponseWriter, r *http.Reques
 			return
 		}
 		select {
-		case <-changed:
+		case <-arrived:
 		case <-timeout:
 			writeBatch(w, nil, next)
 			return

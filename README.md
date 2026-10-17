@@ -97,9 +97,10 @@ mux.Handle("/v1/", b.Handler())
 mux.HandleFunc("POST /demo/press", func(w http.ResponseWriter, r *http.Request) { c.demoPress(w, r, b) })
 ```
 
-`POST /demo/press` `{"message_id": "m2", "user": "alice"}` presses the first button of message `m2` as `alice`, so that
-a script can play the person of an interactive check. Like the rest of the example it has no authentication of its
-own: keep it on loopback.
+`POST /demo/press` `{"message_id": "wl7ffy-m2", "user": "alice"}` presses the first button of message `wl7ffy-m2` as
+`alice`, so that a script can play the person of an interactive check. Like the rest of the example it has no
+authentication of its own: keep it on loopback. Message ids start with a prefix that is random for each start of the
+example, so that a restarted example never reuses an id that Muster still holds.
 
 ## Writing a bridge
 
@@ -112,7 +113,9 @@ own: keep it on loopback.
    `GoneError` (with `bridge.ReasonEditWindowClosed` for an edit the messenger refuses only for the message's age),
    `ForbiddenError` or `InvalidError`. Any other error, and a panic, is answered as `transient` with a generic detail
    and logged without the token.
-3. Mount `b.Handler()` at the bridge's base URL, under a path prefix with `http.StripPrefix`.
+3. Mount `b.Handler()` at the bridge's base URL, under a path prefix with `http.StripPrefix`. Serve it with no
+   `WriteTimeout`, or one above 75 seconds: `pollEvents` holds a request for up to 60 seconds, and a shorter
+   `WriteTimeout` cuts such a poll off without an answer, so that its events reach Muster late.
 4. Report what the messenger tells you: `b.Press`, `b.ThreadMessage`, `b.MessageDeleted` and `b.DirectMessage`. Each
    returns at once, so you confirm a press to your messenger within its deadline whatever Muster does; give the
    messenger's own update id, so that an update it delivers twice is queued once. A direct message that is an Account
@@ -120,8 +123,8 @@ own: keep it on loopback.
 5. Turn Mention markers into native mentions or plain names with `bridge.ReplaceMentions`.
 6. For pushes, give a bot a `PushTarget` — the callback URL and the push secret that its Bridge Connection in Muster
    shows — in `Config.Bots` or later with `b.SetPush`; `b.Close` stops the pushers.
-7. `bridge.NewMemoryStore`, the default `Store`, forgets Idempotency-Keys and queued events on a restart; implement
-   `Store` over your database to keep them. Long polls and pushes are woken in the process that queued an event, so
+7. `bridge.NewMemoryStore`, the default `Store`, forgets Idempotency-Keys and queued events on a restart, and holds a
+   day of events and answers in memory; implement `Store` over your database to keep them. Long polls and pushes are woken in the process that queued an event, so
    with several processes over one store, run each bot in one process only.
 
 The package documentation, on [pkg.go.dev](https://pkg.go.dev/github.com/muster-io/muster-bridge-go) and in

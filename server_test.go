@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -285,11 +286,11 @@ func TestRefusesSpecMismatch(t *testing.T) {
 			`{"user_external_id":"u","body":"` + strings.Repeat("S", 2001) + `"}`,
 			"body /body: maximum string length is 2000"},
 		{"no key", http.MethodPost, "/v1/messages", nil, postBody,
-			"The Idempotency-Key header is missing or not 1 to 255 printable ASCII characters."},
+			"Send an Idempotency-Key header of 1 to 255 visible ASCII characters (no spaces)."},
 		{"key with a space", http.MethodPost, "/v1/messages", key("SECRET X"), postBody,
-			"The Idempotency-Key header is missing or not 1 to 255 printable ASCII characters."},
+			"Send an Idempotency-Key header of 1 to 255 visible ASCII characters (no spaces)."},
 		{"long key", http.MethodPost, "/v1/messages", key(strings.Repeat("k", 256)), postBody,
-			"The Idempotency-Key header is missing"},
+			"Send an Idempotency-Key header"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,7 +321,7 @@ func TestRefusesBodyOverOneMiB(t *testing.T) {
 		t.Fatalf("a body of 1 MiB answered %d: %s", rec.Code, rec.Body)
 	}
 	rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k2"), padded(1<<20+1))
-	if p := wantProblem(t, rec, http.StatusBadRequest, ClassInvalid); detailOf(p) != "The request body is larger than 1 MiB." {
+	if p := wantProblem(t, rec, http.StatusBadRequest, ClassInvalid); detailOf(p) != "The request body exceeds 1 MiB, the most this bridge reads." {
 		t.Fatalf("detail %q", detailOf(p))
 	}
 	if m.count("PostMessage") != 1 {
@@ -609,6 +610,58 @@ func TestIdempotencyKeysLive24Hours(t *testing.T) {
 	}
 }
 
+// A request whose messenger ignores ctx can outlive its claim of the key. A retry then claims the key anew, and when
+// the first request fails at last, its release must not free the retry's claim: a third request still finds the key
+// running, and the retry's answer is the one stored.
+func TestStaleRequestKeepsTheRetrysClaim(t *testing.T) {
+	b, m, clk, _ := newTestBridge(t, nil)
+	// The first two calls wait for their gate; a third, which only a freed claim lets through, answers at once.
+	gates := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	entered := make(chan int, 3)
+	var calls atomic.Int32
+	m.post = func(string, MessageInput) (MessagePosted, error) {
+		n := int(calls.Add(1)) - 1
+		entered <- n
+		if n < len(gates) {
+			<-gates[n]
+		}
+		if n == 0 {
+			return MessagePosted{}, errors.New("the messenger never answered")
+		}
+		return MessagePosted{MessageId: fmt.Sprint("m-call-", n)}, nil
+	}
+	answers := make(chan *httptest.ResponseRecorder, 2)
+	send := func() { answers <- do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), postBody) }
+
+	go send()
+	<-entered
+	clk.Advance(keyClaimTTL)
+	go send()
+	if n := <-entered; n != 1 {
+		t.Fatalf("call %d entered, want the retry's", n)
+	}
+	close(gates[0])
+	if first := <-answers; first.Code != http.StatusInternalServerError {
+		t.Fatalf("the stale request answered %d", first.Code)
+	}
+	rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), postBody)
+	if p := wantProblem(t, rec, http.StatusInternalServerError, ClassTransient); detailOf(p) != "A request with "+
+		"this Idempotency-Key is still running." {
+		t.Fatalf("detail %q: the stale request freed the retry's claim", detailOf(p))
+	}
+	close(gates[1])
+	if retry := <-answers; retry.Code != http.StatusCreated {
+		t.Fatalf("the retry answered %d", retry.Code)
+	}
+	again := decodeJSON(t, do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), postBody).Body.Bytes())
+	if again["replayed"] != true || again["message_id"] != "m-call-1" {
+		t.Fatalf("the key answers %v, want the retry's answer replayed", again)
+	}
+	if n := m.count("PostMessage"); n != 2 {
+		t.Fatalf("the messenger was called %d times", n)
+	}
+}
+
 func TestPanicReleasesKey(t *testing.T) {
 	b, m, _, _ := newTestBridge(t, nil)
 	m.post = func(string, MessageInput) (MessagePosted, error) { panic("boom") }
@@ -671,18 +724,18 @@ func (s *failingStore) ClaimKey(ctx context.Context, bot, key string, now, until
 	return s.Store.ClaimKey(ctx, bot, key, now, until)
 }
 
-func (s *failingStore) SaveKey(ctx context.Context, bot, key string, a StoredAnswer, until time.Time) error {
+func (s *failingStore) SaveKey(ctx context.Context, bot, key, claimID string, a StoredAnswer, until time.Time) error {
 	if err := s.err("SaveKey"); err != nil {
 		return err
 	}
-	return s.Store.SaveKey(ctx, bot, key, a, until)
+	return s.Store.SaveKey(ctx, bot, key, claimID, a, until)
 }
 
-func (s *failingStore) ReleaseKey(ctx context.Context, bot, key string) error {
+func (s *failingStore) ReleaseKey(ctx context.Context, bot, key, claimID string) error {
 	if err := s.err("ReleaseKey"); err != nil {
 		return err
 	}
-	return s.Store.ReleaseKey(ctx, bot, key)
+	return s.Store.ReleaseKey(ctx, bot, key, claimID)
 }
 
 func (s *failingStore) AppendEvent(ctx context.Context, bot string, ev StoredEvent, now time.Time) (bool, error) {
@@ -728,6 +781,10 @@ func TestStoreFailures(t *testing.T) {
 	store.claimAs(&KeyClaim{State: answered, Answer: StoredAnswer{Status: http.StatusCreated, Body: []byte("[1]")}})
 	wantProblem(t, do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k3"), postBody),
 		http.StatusInternalServerError, ClassTransient)
+	store.claimAs(&KeyClaim{State: answered, Answer: StoredAnswer{Status: http.StatusOK,
+		Body: []byte(`{"message_id":"m1","replayed":false}`)}})
+	wantProblem(t, do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k3"), postBody),
+		http.StatusInternalServerError, ClassTransient)
 	store.claimAs(nil)
 
 	store.fail("SaveKey", errors.New("save failed"))
@@ -764,7 +821,8 @@ func TestStoreFailures(t *testing.T) {
 	log := logs.String()
 	for _, want := range []string{"claim failed for [redacted]", "save failed", "release failed", "find failed",
 		"events failed", `msg="bridge: the store failed"`, "cannot store the answer of an Idempotency-Key",
-		"cannot release an Idempotency-Key"} {
+		"cannot release an Idempotency-Key", "cannot be sent again: it is not the JSON of the operation's answer",
+		"cannot be sent again: api/bridge.yaml declares no 200 answer of postMessage"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("the log does not say %q", want)
 		}
@@ -811,7 +869,7 @@ func TestUnreadableBody(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	b.Handler().ServeHTTP(rec, r)
-	if p := wantProblem(t, rec, http.StatusBadRequest, ClassInvalid); detailOf(p) != "The request body could not be read." {
+	if p := wantProblem(t, rec, http.StatusBadRequest, ClassInvalid); detailOf(p) != "Reading the request body failed." {
 		t.Fatalf("detail %q", detailOf(p))
 	}
 }

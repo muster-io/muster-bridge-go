@@ -21,17 +21,22 @@ import (
 // implements it over its own database; NewMemoryStore keeps them in memory.
 type Store interface {
 	// ClaimKey returns KeyAnswered with the answer when one is stored for (bot, key) until after now; else KeyRunning
-	// when another claim holds the key until after now; else it claims the key until `until` and returns KeyClaimed.
+	// when another claim holds the key until after now; else it claims the key until `until` and returns KeyClaimed
+	// with an ID that tells this claim from any later claim of the same key.
 	ClaimKey(ctx context.Context, bot, key string, now, until time.Time) (KeyClaim, error)
-	// SaveKey replaces the claim of (bot, key) by the answer, kept until `until`.
-	SaveKey(ctx context.Context, bot, key string, answer StoredAnswer, until time.Time) error
-	// ReleaseKey removes the claim of (bot, key), so that a retry with the key runs again; it never removes an answer.
-	ReleaseKey(ctx context.Context, bot, key string) error
+	// SaveKey stores the answer of (bot, key), kept until `until`, in place of the claim claimID. When another claim
+	// or an answer holds the key, SaveKey leaves it as it is: the first answer stays, and so does a newer request's
+	// claim.
+	SaveKey(ctx context.Context, bot, key, claimID string, answer StoredAnswer, until time.Time) error
+	// ReleaseKey removes the claim claimID of (bot, key), so that a retry with the key runs again. It removes nothing
+	// else: not an answer, and not the claim of a request that took the key over after claimID expired.
+	ReleaseKey(ctx context.Context, bot, key, claimID string) error
 	// AppendEvent queues the event for the bot unless an event with its ID is kept, and reports whether it queued it.
 	AppendEvent(ctx context.Context, bot string, event StoredEvent, now time.Time) (bool, error)
-	// EventsAfter returns, oldest first, at most limit kept events of the bot after cursor ("" for all kept events) and
-	// the cursor after the last one returned; when none is returned, cursor itself, or for "" the cursor of the end of
-	// the queue. A cursor the store did not give for this bot is ErrUnknownCursor.
+	// EventsAfter returns up to limit of the bot's kept events, oldest first, that follow cursor ("" starts before the
+	// oldest), with the cursor that follows the last one returned. Returning none, it gives cursor back unchanged, or,
+	// for "", the cursor at the end of the queue. A cursor that this store did not issue for the bot is
+	// ErrUnknownCursor.
 	EventsAfter(ctx context.Context, bot, cursor string, limit int, now time.Time) ([]StoredEvent, string, error)
 	// FindEvent returns the kept event of the bot with the id, and whether there is one.
 	FindEvent(ctx context.Context, bot, id string, now time.Time) (StoredEvent, bool, error)
@@ -55,6 +60,8 @@ type KeyClaim struct {
 	State KeyState
 	// Answer is the stored answer, with KeyAnswered.
 	Answer StoredAnswer
+	// ID names the claim, with KeyClaimed; the library gives it back to SaveKey and ReleaseKey.
+	ID string
 }
 
 // StoredAnswer is the first successful answer of an Idempotency-Key.
@@ -81,6 +88,11 @@ var ErrUnknownCursor = errors.New("bridge: unknown cursor")
 
 // NewMemoryStore returns a Store that keeps keys and events in memory, for one process: a restart forgets them, and
 // Muster then polls again without a cursor.
+//
+// Its memory is bounded by time, not by size: it holds every event of the last 24 hours, whatever Muster has already
+// polled or acknowledged (a Thread message carries up to 4000 characters), and the answers of the Idempotency-Keys of
+// the last 24 hours. A bridge whose day of traffic does not fit in memory implements Store over its database, which
+// may also drop the events before the cursor that Muster last sent.
 func NewMemoryStore() Store {
 	return &memoryStore{keys: map[keyRef]*keyEntry{}, queues: map[string]*eventQueue{}}
 }
@@ -90,13 +102,16 @@ type memoryStore struct {
 	keys      map[keyRef]*keyEntry
 	keyExpiry keyHeap
 	queues    map[string]*eventQueue
+	claims    uint64
 }
 
 type keyRef struct{ bot, key string }
 
+// keyEntry is a claim, named by claimID, or the stored answer of a key.
 type keyEntry struct {
 	answered bool
 	answer   StoredAnswer
+	claimID  string
 	until    time.Time
 }
 
@@ -142,22 +157,28 @@ func (s *memoryStore) ClaimKey(_ context.Context, bot, key string, now, until ti
 		}
 		return KeyClaim{State: KeyRunning}, nil
 	}
-	s.setKey(ref, &keyEntry{until: until})
-	return KeyClaim{State: KeyClaimed}, nil
+	s.claims++
+	id := strconv.FormatUint(s.claims, 10)
+	s.setKey(ref, &keyEntry{claimID: id, until: until})
+	return KeyClaim{State: KeyClaimed, ID: id}, nil
 }
 
-func (s *memoryStore) SaveKey(_ context.Context, bot, key string, answer StoredAnswer, until time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.setKey(keyRef{bot, key}, &keyEntry{answered: true, answer: answer, until: until})
-	return nil
-}
-
-func (s *memoryStore) ReleaseKey(_ context.Context, bot, key string) error {
+func (s *memoryStore) SaveKey(_ context.Context, bot, key, claimID string, answer StoredAnswer, until time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ref := keyRef{bot, key}
-	if e, ok := s.keys[ref]; ok && !e.answered {
+	if held, ok := s.keys[ref]; ok && (held.answered || held.claimID != claimID) {
+		return nil
+	}
+	s.setKey(ref, &keyEntry{answered: true, answer: answer, until: until})
+	return nil
+}
+
+func (s *memoryStore) ReleaseKey(_ context.Context, bot, key, claimID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ref := keyRef{bot, key}
+	if held, ok := s.keys[ref]; ok && !held.answered && held.claimID == claimID {
 		delete(s.keys, ref)
 	}
 	return nil

@@ -4,6 +4,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +23,7 @@ import (
 	"time"
 )
 
-// pushed is one push the receiver got.
+// pushed is one push the callback got.
 type pushed struct {
 	id, timestamp string
 	body          []byte
@@ -29,9 +31,9 @@ type pushed struct {
 	status        int
 }
 
-// receiver is Muster's push callback in tests: it verifies every signature and timestamp on its own, and answers from
+// callback stands in for Muster's push callback in tests: it verifies every signature and timestamp on its own, and answers from
 // its script.
-type receiver struct {
+type callback struct {
 	t   *testing.T
 	clk *fakeClock
 	key []byte
@@ -39,7 +41,7 @@ type receiver struct {
 	got chan pushed
 
 	mu         sync.Mutex
-	statuses   []int
+	script     []int
 	statusOf   func(id string) int
 	holdFirst  int
 	inFlight   int
@@ -48,13 +50,16 @@ type receiver struct {
 	problems   []string
 }
 
-func newReceiver(t *testing.T, clk *fakeClock, secret string, statuses ...int) *receiver {
+func newCallback(t *testing.T, clk *fakeClock, secret string, script ...int) *callback {
 	t.Helper()
-	key, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, "whsec_"))
-	if err != nil {
-		t.Fatal(err)
+	raw, found := strings.CutPrefix(secret, "whsec_")
+	key := make([]byte, base64.StdEncoding.DecodedLen(len(raw)))
+	n, err := base64.StdEncoding.Decode(key, []byte(raw))
+	if !found || err != nil {
+		t.Fatalf("the callback cannot use the secret: prefix %t, %v", found, err)
 	}
-	rc := &receiver{t: t, clk: clk, key: key, got: make(chan pushed, 100), statuses: statuses}
+	key = key[:n]
+	rc := &callback{t: t, clk: clk, key: key, got: make(chan pushed, 100), script: script}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/elsewhere", func(http.ResponseWriter, *http.Request) {
 		rc.mu.Lock()
@@ -74,17 +79,33 @@ func newReceiver(t *testing.T, clk *fakeClock, secret string, statuses ...int) *
 	return rc
 }
 
-func (rc *receiver) target() *PushTarget {
+// signedByKey checks a webhook-signature header as a receiver of Standard Webhooks does: one of its space-separated
+// entries is "v1," and the base64 of the HMAC-SHA256 of id.timestamp.body under the callback's key.
+func (rc *callback) signedByKey(id, timestamp string, body []byte, header string) bool {
+	h := hmac.New(sha256.New, rc.key)
+	_, _ = h.Write(bytes.Join([][]byte{[]byte(id), []byte(timestamp), body}, []byte(".")))
+	expected := h.Sum(nil)
+	for entry := range strings.FieldsSeq(header) {
+		version, encoded, _ := strings.Cut(entry, ",")
+		mac, err := base64.StdEncoding.DecodeString(encoded)
+		if version == "v1" && err == nil && hmac.Equal(mac, expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func (rc *callback) target() *PushTarget {
 	return &PushTarget{URL: rc.srv.URL + "/api/v1/callbacks/bridge/c1", Secret: testSecret}
 }
 
-func (rc *receiver) problem(format string, args ...any) {
+func (rc *callback) problem(format string, args ...any) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	rc.problems = append(rc.problems, fmt.Sprintf(format, args...))
 }
 
-func (rc *receiver) serve(w http.ResponseWriter, r *http.Request) {
+func (rc *callback) serve(w http.ResponseWriter, r *http.Request) {
 	rc.mu.Lock()
 	rc.inFlight++
 	rc.maxFlight = max(rc.maxFlight, rc.inFlight)
@@ -101,11 +122,9 @@ func (rc *receiver) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	p := pushed{id: r.Header.Get("webhook-id"), timestamp: r.Header.Get("webhook-timestamp"), body: body,
 		header: r.Header.Clone()}
-	mac := hmac.New(sha256.New, rc.key)
-	mac.Write([]byte(p.id + "." + p.timestamp + "." + string(body)))
-	want := "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	if got := r.Header.Get("webhook-signature"); !hmac.Equal([]byte(got), []byte(want)) {
-		rc.problem("push %s: signature %q, want %q", p.id, got, want)
+	if !rc.signedByKey(p.id, p.timestamp, body, r.Header.Get("webhook-signature")) {
+		rc.problem("push %s: webhook-signature %q is not a v1 signature with the push secret",
+			p.id, r.Header.Get("webhook-signature"))
 	}
 	if now := strconv.FormatInt(rc.clk.Now().Unix(), 10); p.timestamp != now {
 		rc.problem("push %s: webhook-timestamp %s, want the clock's %s", p.id, p.timestamp, now)
@@ -124,8 +143,8 @@ func (rc *receiver) serve(w http.ResponseWriter, r *http.Request) {
 	rc.mu.Lock()
 	p.status = http.StatusNoContent
 	switch {
-	case len(rc.statuses) > 0:
-		p.status, rc.statuses = rc.statuses[0], rc.statuses[1:]
+	case len(rc.script) > 0:
+		p.status, rc.script = rc.script[0], rc.script[1:]
 	case rc.statusOf != nil:
 		p.status = rc.statusOf(p.id)
 	}
@@ -142,7 +161,7 @@ func (rc *receiver) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // next is the next push, within 10 s.
-func (rc *receiver) next() pushed {
+func (rc *callback) next() pushed {
 	rc.t.Helper()
 	select {
 	case p := <-rc.got:
@@ -154,7 +173,7 @@ func (rc *receiver) next() pushed {
 }
 
 // none checks that no push is waiting.
-func (rc *receiver) none() {
+func (rc *callback) none() {
 	rc.t.Helper()
 	select {
 	case p := <-rc.got:
@@ -172,7 +191,7 @@ func settle(t *testing.T, clk *fakeClock, d time.Duration) {
 
 func TestPushSignsEventsInOrder(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	var ids []string
 	for i := range 3 {
@@ -192,16 +211,16 @@ func TestPushSignsEventsInOrder(t *testing.T) {
 
 func TestPushOneAtATime(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret, http.StatusInternalServerError)
+	rc := newCallback(t, clk, testSecret, http.StatusInternalServerError)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	first := reportPress(t, b, "u1")
 	second := reportPress(t, b, "u2")
 	if p := rc.next(); p.id != first {
 		t.Fatalf("push %s", p.id)
 	}
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	rc.none()
-	clk.Advance(pushBackoffFirst)
+	clk.Advance(firstBackoff)
 	for _, want := range []string{first, second} {
 		if p := rc.next(); p.id != want {
 			t.Fatalf("push %s, want %s", p.id, want)
@@ -211,7 +230,7 @@ func TestPushOneAtATime(t *testing.T) {
 
 func TestPushRetriesWithBackoffUnderSameID(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret, 500, 500, 401, 503)
+	rc := newCallback(t, clk, testSecret, 500, 500, 401, 503)
 	b, _, _, logs := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	id := reportPress(t, b, "u1")
 	var stamps []string
@@ -237,7 +256,7 @@ func TestPushRetriesWithBackoffUnderSameID(t *testing.T) {
 
 func TestPushKeepsOn401(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret, 401, 401)
+	rc := newCallback(t, clk, testSecret, 401, 401)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	id := reportPress(t, b, "u1")
 	rc.next()
@@ -249,9 +268,9 @@ func TestPushKeepsOn401(t *testing.T) {
 	}
 }
 
-func TestPushDropsOn400(t *testing.T) {
+func TestPushBadRequestDropsTheEvent(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret, 400)
+	rc := newCallback(t, clk, testSecret, 400)
 	b, _, _, logs := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	first := reportPress(t, b, "u1")
 	second := reportPress(t, b, "u2")
@@ -271,13 +290,13 @@ func TestPushDropsOn400(t *testing.T) {
 
 func TestPushTimeoutRetries(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	rc.holdFirst = 1
 	b, _, _, logs := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	id := reportPress(t, b, "u1")
 	rc.next()
-	settle(t, clk, pushTimeout)
-	settle(t, clk, pushBackoffFirst)
+	settle(t, clk, attemptTimeout)
+	settle(t, clk, firstBackoff)
 	if p := rc.next(); p.id != id || p.status != http.StatusNoContent {
 		t.Fatalf("push %s %d", p.id, p.status)
 	}
@@ -288,7 +307,7 @@ func TestPushTimeoutRetries(t *testing.T) {
 
 func TestPushBackoffCapsAtFiveMinutes(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	rc.statusOf = func(string) int { return http.StatusServiceUnavailable }
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	reportPress(t, b, "u1")
@@ -301,7 +320,7 @@ func TestPushBackoffCapsAtFiveMinutes(t *testing.T) {
 
 func TestPushGivesUpAfterAnHour(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	b, _, _, logs := newTestBridge(t, func(c *Config) { c.clock = clk })
 	first := reportPress(t, b, "u1")
 	second := reportPress(t, b, "u2")
@@ -315,21 +334,21 @@ func TestPushGivesUpAfterAnHour(t *testing.T) {
 		t.Fatal(err)
 	}
 	var elapsed time.Duration
-	delay, attempts := pushBackoffFirst, 0
+	delay, attempts := firstBackoff, 0
 	for {
 		p := rc.next()
 		if p.id == second {
 			break
 		}
 		attempts++
-		if elapsed >= pushRetryFor {
+		if elapsed >= retryWindow {
 			continue // the last attempt: the pusher gives up and pushes the next event at once
 		}
 		settle(t, clk, delay)
 		elapsed += delay
-		delay = min(2*delay, pushBackoffMax)
+		delay = min(2*delay, maxBackoff)
 	}
-	if attempts != 21 || elapsed < pushRetryFor {
+	if attempts != 21 || elapsed < retryWindow {
 		t.Fatalf("gave up after %d attempts and %s", attempts, elapsed)
 	}
 	if !strings.Contains(logs.String(), `msg="bridge: gave up pushing an event, it stays for polling"`) ||
@@ -343,7 +362,7 @@ func TestPushGivesUpAfterAnHour(t *testing.T) {
 
 func TestPushDoesNotFollowRedirects(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret, http.StatusFound)
+	rc := newCallback(t, clk, testSecret, http.StatusFound)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	id := reportPress(t, b, "u1")
 	rc.next()
@@ -360,7 +379,7 @@ func TestPushDoesNotFollowRedirects(t *testing.T) {
 
 func TestPushWithoutTargetQueuesForLater(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk })
 	first := reportPress(t, b, "u1")
 	second := reportPress(t, b, "u2")
@@ -385,13 +404,13 @@ func TestPushWithoutTargetQueuesForLater(t *testing.T) {
 
 func TestSetPushRetargets(t *testing.T) {
 	clk := newFakeClock()
-	failing := newReceiver(t, clk, testSecret)
+	failing := newCallback(t, clk, testSecret)
 	failing.statusOf = func(string) int { return http.StatusInternalServerError }
-	working := newReceiver(t, clk, testSecret)
+	working := newCallback(t, clk, testSecret)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = failing.target() })
 	id := reportPress(t, b, "u1")
 	failing.next()
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	if err := b.SetPush("main", working.target()); err != nil {
 		t.Fatal(err)
 	}
@@ -403,12 +422,12 @@ func TestSetPushRetargets(t *testing.T) {
 
 func TestSetPushNilStopsPushing(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
-	rc.statuses = []int{http.StatusInternalServerError}
+	rc := newCallback(t, clk, testSecret)
+	rc.script = []int{http.StatusInternalServerError}
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	id := reportPress(t, b, "u1")
 	rc.next()
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	if err := b.SetPush("main", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +445,7 @@ func TestSetPushNilStopsPushing(t *testing.T) {
 
 func TestSetPushNilBeforeAnyTargetLeavesNoSignal(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret, http.StatusInternalServerError)
+	rc := newCallback(t, clk, testSecret, http.StatusInternalServerError)
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk })
 	if err := b.SetPush("main", nil); err != nil {
 		t.Fatal(err)
@@ -436,11 +455,35 @@ func TestSetPushNilBeforeAnyTargetLeavesNoSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc.next()
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	rc.none()
-	clk.Advance(pushBackoffFirst)
+	clk.Advance(firstBackoff)
 	if p := rc.next(); p.id != id {
 		t.Fatalf("push %s", p.id)
+	}
+}
+
+// A bridge that applies its configuration again and again adds each push secret to its redaction once.
+func TestSetPushKeepsEachSecretOnce(t *testing.T) {
+	b, _, _, _ := newTestBridge(t, nil)
+	target := &PushTarget{URL: "https://muster.example.org/api/v1/callbacks/bridge/c1", Secret: testSecret}
+	for range 50 {
+		if err := b.SetPush("main", target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rotated := "whsec_" + base64.StdEncoding.EncodeToString([]byte("the rotated key of the push target"))
+	if err := b.SetPush("other", &PushTarget{URL: target.URL, Secret: rotated}); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	held := slices.Clone(b.secrets)
+	b.mu.Unlock()
+	if len(held) != 2 || held[0] != testSecret || held[1] != rotated {
+		t.Fatalf("the bridge holds %d push secrets", len(held))
+	}
+	if got := b.redact("a " + rotated + " b"); got != "a [redacted] b" {
+		t.Fatalf("redacted %q", got)
 	}
 }
 
@@ -450,8 +493,8 @@ func TestSetPushRefuses(t *testing.T) {
 		t.Fatalf("unknown bot: %v", err)
 	}
 	err := b.SetPush("main", &PushTarget{URL: "ftp://x", Secret: "whsec_!!!secret"})
-	if err == nil || !strings.Contains(err.Error(), "url is not an absolute http or https URL") ||
-		!strings.Contains(err.Error(), "secret is not whsec_") || strings.Contains(err.Error(), "!!!secret") {
+	if err == nil || !strings.Contains(err.Error(), "the url needs the http or https scheme") ||
+		!strings.Contains(err.Error(), "the secret needs the whsec_ prefix") || strings.Contains(err.Error(), "!!!secret") {
 		t.Fatalf("invalid target: %v", err)
 	}
 	poll, _, _, _ := newTestBridge(t, func(c *Config) { c.EventDelivery = []InfoEventDelivery{InfoEventDeliveryPoll} })
@@ -472,12 +515,12 @@ func TestSetPushRefuses(t *testing.T) {
 
 func TestCloseStopsPushers(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	rc.statusOf = func(string) int { return http.StatusInternalServerError }
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	reportPress(t, b, "u1")
 	rc.next()
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := b.Close(ctx); err != nil {
@@ -493,7 +536,7 @@ func TestCloseStopsPushers(t *testing.T) {
 
 func TestCloseDuringAnAttempt(t *testing.T) {
 	clk := newFakeClock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	rc.holdFirst = 1
 	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
 	reportPress(t, b, "u1")
@@ -519,7 +562,7 @@ func TestCloseHonoursContext(t *testing.T) {
 		}
 	}
 	store.mu.Unlock()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	if err := b.SetPush("main", rc.target()); err != nil {
 		t.Fatal(err)
 	}
@@ -538,24 +581,24 @@ func TestCloseHonoursContext(t *testing.T) {
 func TestPushStoreFailures(t *testing.T) {
 	clk := newFakeClock()
 	store := newFailingStore()
-	rc := newReceiver(t, clk, testSecret)
+	rc := newCallback(t, clk, testSecret)
 	b, _, _, logs := newTestBridge(t, func(c *Config) { c.clock = clk; c.Store = store })
 	first := reportPress(t, b, "u1")
 	store.fail("EventsAfter", errors.New("events failed"))
 	if err := b.SetPush("main", rc.target()); err != nil {
 		t.Fatal(err)
 	}
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	store.fail("EventsAfter", nil)
-	clk.Advance(pushBackoffFirst)
+	clk.Advance(firstBackoff)
 	if p := rc.next(); p.id != first {
 		t.Fatalf("push %s", p.id)
 	}
 	store.fail("EventsAfter", ErrUnknownCursor)
 	second := reportPress(t, b, "u2")
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	store.fail("EventsAfter", nil)
-	clk.Advance(pushBackoffFirst)
+	clk.Advance(firstBackoff)
 	for _, want := range []string{first, second} {
 		if p := rc.next(); p.id != want {
 			t.Fatalf("push %s, want %s", p.id, want)
@@ -576,7 +619,7 @@ func TestPushSecretNeverLogged(t *testing.T) {
 		c.Bots[0].Push = &PushTarget{URL: "http://127.0.0.1:1/cb?s=" + testSecret, Secret: testSecret}
 	})
 	reportPress(t, b, "u1")
-	clk.awaitTimer(t, pushBackoffFirst)
+	clk.awaitTimer(t, firstBackoff)
 	log := logs.String()
 	if !strings.Contains(log, `msg="bridge: a push failed, retrying"`) || !strings.Contains(log, "[redacted]") {
 		t.Fatalf("log = %s", log)
@@ -588,7 +631,7 @@ func TestPushSecretNeverLogged(t *testing.T) {
 
 func TestPushTargetsOfEachBot(t *testing.T) {
 	clk := newFakeClock()
-	rcMain, rcOther := newReceiver(t, clk, testSecret), newReceiver(t, clk, testSecret)
+	rcMain, rcOther := newCallback(t, clk, testSecret), newCallback(t, clk, testSecret)
 	b, _, _, _ := newTestBridge(t, func(c *Config) {
 		c.clock = clk
 		c.Bots[0].Push, c.Bots[1].Push = rcMain.target(), rcOther.target()
@@ -607,11 +650,14 @@ func TestPushTargetsOfEachBot(t *testing.T) {
 	rcMain.none()
 }
 
-func TestSignature(t *testing.T) {
-	// The example of the Standard Webhooks specification.
-	key, _ := base64.StdEncoding.DecodeString("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")
-	got := sign(key, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", []byte(`{"test": 2432232314}`))
-	if got != "g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=" {
-		t.Fatalf("signature %s", got)
+func TestWebhookSignatureMatchesTheReferenceVector(t *testing.T) {
+	// Standard Webhooks publishes this secret, message and expected header for implementations to check against.
+	key, ok := secretKey("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")
+	if !ok {
+		t.Fatal("the reference secret does not decode")
+	}
+	got := webhookSignature(key, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", []byte(`{"test": 2432232314}`))
+	if want := "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="; got != want {
+		t.Fatalf("webhook-signature %s, want %s", got, want)
 	}
 }

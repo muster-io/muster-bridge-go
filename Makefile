@@ -31,7 +31,7 @@ OAPI_CODEGEN := $(TOOLS)/oapi-codegen-$(OAPI_CODEGEN_VERSION)
 
 MUSTER_SPEC_URL ?= https://raw.githubusercontent.com/muster-io/muster/master/api/bridge.yaml
 MUSTER_IMAGE ?= ghcr.io/muster-io/muster:edge
-ALLOWED_LICENSES ?= MIT,MIT-0,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,0BSD,Unlicense,CC0-1.0
+ALLOWED_LICENSES := MIT,MIT-0,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,0BSD,Unlicense,CC0-1.0
 COVERAGE_MIN := 90
 COVER_PROFILE := $(BIN)/cover.out
 
