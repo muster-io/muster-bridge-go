@@ -38,16 +38,17 @@ In this order; an earlier source wins over a later one.
 | `models.gen.go` | generated from `api/bridge.yaml` by `make generate`; never edited by hand |
 | `*_test.go` | the tests; `spec_test.go` validates every request and answer against the specification, `example_test.go` holds the runnable examples |
 | `examples/minimal/` | the minimal example, one file, which the README's quick start shows and `make conformance` checks |
+| `examples/chat/` | the example bridge: a chat with its web page (`web/`), its README and Dockerfile; `make conformance` checks it and `image.yml` publishes its image |
 | `api/` | the specification's copy and the oapi-codegen configuration |
 | `.github/` | the workflows, Renovate and the pull request template |
 
 ## Make targets
 
 The Makefile is the only entry point; `make help` lists the targets. `make ci` runs what a pull request runs, except
-`vulncheck` and `conformance`, which CI runs as jobs of their own. `make conformance` runs `muster bridge check` from
-`ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against `examples/minimal` three times and needs Docker on Linux,
-because the check reaches the example through the host's network. The tools are pinned in the Makefile under
-`# renovate:` comments and built into `bin/tools/`.
+`vulncheck`, `image` and `conformance`, which CI runs as jobs of their own. `make conformance` runs `muster bridge
+check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against `examples/minimal` and `examples/chat`, three
+times each, and needs Docker on Linux, because the check reaches the examples through the host's network. The tools are
+pinned in the Makefile under `# renovate:` comments and built into `bin/tools/`.
 
 ## Rules
 
@@ -62,8 +63,9 @@ because the check reaches the example through the host's network. The tools are 
 - Tests run with the race detector; the coverage gate is 90 % of the package's statements, `models.gen.go` excluded.
 - Log through the `Config`'s `*slog.Logger`, never with `fmt.Print*` and never a token, a push secret or an Account
   link token; the library redacts the bots' tokens and push secrets in every log line and problem detail.
-- Every Go file, workflow, YAML file, `renovate.json5` and the Makefile start with `SPDX-License-Identifier: MIT` and
-  `Copyright The Muster Authors` in their comment syntax; `make lint` names a file without them.
+- Every Go file, workflow, YAML file, `renovate.json5`, the Makefile, the Dockerfile, `.dockerignore` and the page's
+  HTML, JavaScript and CSS start with `SPDX-License-Identifier: MIT` and `Copyright The Muster Authors` in their comment
+  syntax; `make lint` names a file without them.
 - Comments are few: document exported identifiers, and explain only what the code cannot say.
 - Go versions: the `go` line of `go.mod` is the older of the two supported Go releases, and CI's `test` job runs both,
   with `GOTOOLCHAIN=local`. When Go releases, move the `go` line and the versions in `.github/workflows/` by hand in one

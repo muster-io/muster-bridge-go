@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: MIT
+# Copyright The Muster Authors
+
+# Publishes the example bridge's image, ghcr.io/muster-io/muster-example-bridge, built from examples/chat/Dockerfile
+# for linux/amd64 and linux/arm64: sha-<7 hex digits> and edge for each push to master, and vX.Y.Z for each release
+# tag. release-please pushes the tags with its App's token, so they start this workflow; a tag pushed with
+# GITHUB_TOKEN would not. The Dockerfile cross-compiles, so no emulator is set up. The images are not signed: Muster
+# pins the one it tests by digest. The source label links the package to this repository on its first publication.
+name: image
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# A newer push to master cancels the build of an older one: the newest commit wins and edge never moves back, but a
+# commit whose build was cancelled gets no sha-<7 hex digits> tag. A tag's build always runs.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/master' }}
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The version is the tag of highest priority: sha-<7 hex digits> on master, vX.Y.Z on a release tag. The labels
+      # are also written as annotations of the index, which is what the registry shows for an image of two platforms.
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ghcr.io/muster-io/muster-example-bridge
+          flavor: latest=false
+          tags: |
+            type=sha,prefix=sha-,format=short,priority=300,enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=semver,pattern=v{{version}}
+          labels: |
+            org.opencontainers.image.title=muster-example-bridge
+            org.opencontainers.image.description=The example bridge of muster-bridge-go: an in-memory chat with its web page that offers every feature of Muster's Bridge protocol
+          annotations: |
+            org.opencontainers.image.title=muster-example-bridge
+            org.opencontainers.image.description=The example bridge of muster-bridge-go: an in-memory chat with its web page that offers every feature of Muster's Bridge protocol
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: examples/chat/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          push: true

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Copyright The Muster Authors -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Example chat</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header id="top" class="top">
+  <div class="brand">
+    <span class="brand-name">Example chat</span>
+    <span id="bridge" class="bridge"></span>
+  </div>
+  <div class="controls">
+    <label class="viewer" for="viewer">You are</label>
+    <select id="viewer"></select>
+    <button type="button" id="log-toggle" class="toggle" data-action="log" aria-controls="log" aria-expanded="true">Event log</button>
+    <span id="offline" class="offline" role="status" hidden>offline</span>
+  </div>
+</header>
+<div id="layout" class="layout">
+  <nav id="sidebar" class="sidebar" aria-label="Chats">
+    <h2 class="side-title">Channels</h2>
+    <ul id="channels" class="nav-list"></ul>
+    <h2 class="side-title">Direct</h2>
+    <ul id="directs" class="nav-list"></ul>
+    <h2 class="side-title">Features</h2>
+    <ul id="features" class="features"></ul>
+  </nav>
+  <main id="view" class="view" aria-labelledby="view-title">
+    <h1 id="view-title" class="view-title">Example chat</h1>
+    <p id="view-empty" class="empty">Loading…</p>
+    <ol id="posts" class="posts" aria-labelledby="view-title"></ol>
+    <section id="direct" class="direct" aria-labelledby="view-title" hidden>
+      <ol id="bubbles" class="bubbles"></ol>
+      <form id="direct-form" class="compose direct-compose">
+        <label class="sr-only" for="direct-text">Message the bot</label>
+        <textarea id="direct-text" rows="2" maxlength="4000" placeholder="Message the bot. Paste an Account link token here to link your account."></textarea>
+        <button type="submit" class="btn btn-primary">Send</button>
+      </form>
+    </section>
+    <div id="view-end" class="view-end"></div>
+  </main>
+  <aside id="log" class="log" aria-labelledby="log-title">
+    <h2 id="log-title" class="side-title">Event log</h2>
+    <ol id="log-entries" class="log-entries"></ol>
+  </aside>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
