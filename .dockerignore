@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright The Muster Authors
+
+# The build context of examples/chat/Dockerfile, as an allow-list: the module, the specification that the package
+# embeds and the example with its page. The tests, bin/ and .git stay out.
+*
+!go.mod
+!go.sum
+!*.go
+!api/bridge.yaml
+!examples/chat/
+*_test.go
+examples/chat/*_test.go

@@ -30,22 +30,23 @@ The Makefile is the only entry point:
 | `make help` | lists the targets (the default goal) |
 | `make fmt` | formats the code (gofmt and goimports through golangci-lint) |
 | `make lint` | checks the licence headers, `go.mod` and `go.sum`, and the code with golangci-lint |
-| `make test` | runs the tests with the race detector and the coverage gate: 90 % of the package's statements, `models.gen.go` excluded |
+| `make test` | runs the tests of the package and the examples with the race detector, and the coverage gate: 90 % of the package's statements, `models.gen.go` excluded |
 | `make generate` | generates `models.gen.go` from `api/bridge.yaml` with oapi-codegen |
 | `make generate-check` | regenerates and fails when `models.gen.go` was not current |
 | `make spec-check` | compares `api/bridge.yaml` byte for byte with the one on Muster's `master` (`MUSTER_SPEC_URL`) and prints the difference |
 | `make spec-sync` | replaces `api/bridge.yaml` with Muster's and runs `make generate` |
 | `make licenses` | fails on a dependency linked into the library or the example whose licence is not allowed |
 | `make vulncheck` | finds vulnerable Go code that is called (govulncheck) |
-| `make build` | builds the package and the example into `bin/minimal` |
+| `make build` | builds the package and the examples into `bin/minimal` and `bin/chat` |
 | `make ci` | runs `lint`, `generate-check`, `spec-check`, `licenses`, `test` and `build` |
-| `make conformance` | runs `muster bridge check` from Muster's development image against `examples/minimal` three times |
+| `make image` | builds the example bridge's image for this machine with Docker and prints its `-help` |
+| `make conformance` | runs `muster bridge check` from Muster's development image against `examples/minimal` and `examples/chat`, three times each |
 | `make clean` | removes `bin/` |
 
 In CI, the `ci` workflow runs the jobs `lint`, `test` (on Go 1.26 and 1.27), `generate`, `spec`, `licenses`,
-`vulncheck` and `conformance` on every pull request, on every push to `master`, daily and by hand; the job `ci` passes
-only when all of them passed, and the ruleset of `master` requires it. The `codeql` and `scorecard` workflows analyse
-the code and the repository's practices.
+`vulncheck`, `image` and `conformance` on every pull request, on every push to `master`, daily and by hand; the job
+`ci` passes only when all of them passed, and the ruleset of `master` requires it. The `codeql` and `scorecard`
+workflows analyse the code and the repository's practices.
 
 ## Branches, commits and pull requests
 
@@ -63,8 +64,8 @@ the code and the repository's practices.
 
 ## Licence header
 
-Every Go file, workflow, YAML file, the Renovate configuration and the Makefile start with these two lines in their own
-comment syntax:
+Every Go file, workflow, YAML file, the Renovate configuration, the Makefile, the Dockerfile, `.dockerignore` and the
+page's HTML, JavaScript and CSS start with these two lines in their own comment syntax:
 
 ```go
 // SPDX-License-Identifier: MIT

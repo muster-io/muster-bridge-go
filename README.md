@@ -139,8 +139,32 @@ prints `PASS`, `FAIL` or `SKIP` for each; `--forbidden-channel` and `--handle` e
 `--no-interactive` it also waits for a person to press a button (`press`) and, for a bridge that pushes, receives the
 push (`push`): it prints `PUSH <url>` once its listener (`--push-listen`) is up — point the bridge's push target there,
 with the secret of `--push-secret-file` — and `WAIT press: …, message_id <id>` before it waits. `make conformance`
-plays that person through the example's `/demo/press`; do the same in your bridge's tests with your messenger's own
-means.
+plays that person through the minimal example's `POST /demo/press` and the chat example's `POST /chat/api/press`; do
+the same in your bridge's tests with your messenger's own means.
+
+## The example bridge
+
+[`examples/chat`](examples/chat) is a bridge with a messenger of its own: a small chat in memory with a web page —
+channels, Threads, buttons in their style hints, direct chats between a person and the bot, a picker of who you are,
+and an event log — served beside the Bridge protocol on one port. It offers every feature of the protocol, so that
+Muster can be tried, and tested, without a real messenger. Its image is published for linux/amd64 and linux/arm64, as
+`vX.Y.Z` for each release and as `edge` and `sha-<7 hex digits>` for each commit on `master`:
+
+```sh
+docker run --rm -p 8095:8095 -e BRIDGE_TOKEN=example-token ghcr.io/muster-io/muster-example-bridge:<version>
+```
+
+The page is then at `http://127.0.0.1:8095/`. In Muster, create a Bridge Connection with the base URL at which Muster
+reaches the example, such as `http://127.0.0.1:8095`, and the same token, and a Destination on it for the channel
+`alerts`. With the event delivery Polling, Muster polls the example for its events. For Push, start the example with
+`BRIDGE_PUSH_URL` set to the callback address that the Bridge Connection shows, and `BRIDGE_PUSH_SECRET` (or
+`-push-secret-file`) set to its push secret. `BRIDGE_FEATURES` limits the features it offers, comma-separated: with
+`BRIDGE_FEATURES=thread_messages`, for one, it shows no buttons and people answer with Text commands in Threads.
+
+The page and its JSON API under `/chat/api/` have **no authentication** of their own: whoever reaches them reads every
+message and acts as any person. Put them behind some, such as an authenticating proxy, before the example is reachable
+from beyond your machine. [`examples/chat/README.md`](examples/chat/README.md) shows how to run it next to
+`muster dev`, link accounts, and drive the page from scripts.
 
 ## The protocol copy
 
@@ -156,15 +180,16 @@ The Makefile is the only entry point; `make help` lists the targets.
 |---|---|
 | `make fmt` | formats the code (gofmt and goimports through golangci-lint) |
 | `make lint` | checks the licence headers, `go.mod` and `go.sum`, and the code with golangci-lint |
-| `make test` | runs the tests with the race detector and the coverage gate of 90 % of the package (`models.gen.go` excluded) |
+| `make test` | runs the tests of the package and the examples with the race detector, and the coverage gate of 90 % of the package (`models.gen.go` excluded) |
 | `make generate`, `make generate-check` | generates `models.gen.go` from `api/bridge.yaml`; fails when it is stale |
 | `make spec-check`, `make spec-sync` | compares `api/bridge.yaml` with Muster's; replaces it and regenerates |
 | `make licenses` | fails on a linked dependency outside MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, Unlicense and CC0-1.0 |
 | `make vulncheck` | finds vulnerable Go code that is called (govulncheck) |
-| `make build` | builds the package and `bin/minimal` |
+| `make build` | builds the package, `bin/minimal` and `bin/chat` |
 | `make ci` | `lint`, `generate-check`, `spec-check`, `licenses`, `test` and `build`, as a pull request runs them |
-| `make conformance` | runs `muster bridge check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against the example three times: every feature, only `thread_messages`, and interactively with push; Linux with Docker only |
-| `make clean` | removes `bin/`: the example, the coverage profiles and the installed tools |
+| `make image` | builds the example bridge's image for this machine (`IMAGE`, `muster-example-bridge:dev` by default) and prints its `-help`; needs Docker |
+| `make conformance` | runs `muster bridge check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against each example three times: every feature, only `thread_messages`, and interactively with push; Linux with Docker only |
+| `make clean` | removes `bin/`: the examples, the coverage profiles and the installed tools |
 
 The pinned tools (golangci-lint, go-licenses, govulncheck, oapi-codegen) are built into `bin/tools/` on first use.
 
