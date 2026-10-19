@@ -87,9 +87,10 @@ pinned in the Makefile under `# renovate:` comments and built into `bin/tools/`.
 - Conventional commits on one line, `<type>(<scope>): <description>`; say what changed, without story or phase IDs.
 - No AI attribution: no `Co-Authored-By` trailers for tools, no "Generated with" lines, in commits or pull requests.
 - Pull requests are squash-merged; the title is the commit message and release-please's changelog line.
-- The pull request body has `Closes muster-io/muster#<issue>`, `Story: S-NNN`, a table with every `acceptance`
-  statement and its evidence, the output of `verify`, every change to the story file with its reason, the dependencies
-  added, and the steps the maintainer takes outside the repository.
+- The pull request body has `Part of muster-io/muster#<issue>` — a pull request here does not close an issue in
+  Muster's repository, so the issue there is closed by hand once it merges — `Story: S-NNN`, a table with every
+  `acceptance` statement and its evidence, the output of `verify`, every change to the story file with its reason, the
+  dependencies added, and the steps the maintainer takes outside the repository.
 
 ## Don't
 
