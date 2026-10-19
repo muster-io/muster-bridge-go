@@ -57,10 +57,10 @@ workflows analyse the code and the repository's practices.
 - No AI attribution: no `Co-Authored-By` trailers for tools and no "Generated with" lines, in commits or pull requests.
 - Pull requests are squash-merged, so the title becomes the commit message, and release-please writes the changelog
   from it.
-- The [pull request template](.github/pull_request_template.md) asks for the issue it closes
-  (`Closes muster-io/muster#<issue>`), the story ID, a table with every acceptance statement and its evidence, the
-  output of the story's `verify`, every change to the story file with its reason, the dependencies added and the
-  maintainer's steps.
+- The [pull request template](.github/pull_request_template.md) asks for the issue in Muster's repository
+  (`Part of muster-io/muster#<issue>`: a pull request here does not close it, so it is closed by hand once the pull
+  request merges), the story ID, a table with every acceptance statement and its evidence, the output of the story's
+  `verify`, every change to the story file with its reason, the dependencies added and the maintainer's steps.
 
 ## Licence header
 

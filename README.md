@@ -98,9 +98,9 @@ mux.HandleFunc("POST /demo/press", func(w http.ResponseWriter, r *http.Request) 
 ```
 
 `POST /demo/press` `{"message_id": "wl7ffy-m2", "user": "alice"}` presses the first button of message `wl7ffy-m2` as
-`alice`, so that a script can play the person of an interactive check. Like the rest of the example it has no
-authentication of its own: keep it on loopback. Message ids start with a prefix that is random for each start of the
-example, so that a restarted example never reuses an id that Muster still holds.
+`alice`, so that a script can play the person of an interactive check. It has no authentication of its own: keep it
+on loopback. Message ids start with a prefix that is random for each start of the example, so that a restarted example
+never reuses an id that Muster still holds.
 
 ## Writing a bridge
 

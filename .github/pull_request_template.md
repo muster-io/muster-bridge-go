@@ -1,6 +1,9 @@
-Closes muster-io/muster#<issue>
+Part of muster-io/muster#<issue>
 
 Story: S-NNN
+
+<!-- A pull request here does not close an issue in Muster's repository: the issue there is closed by hand once this
+pull request merges. -->
 
 ## Acceptance evidence
 
