@@ -340,7 +340,7 @@ type Capabilities struct {
 type Capabilities_Buttons struct {
 	DataMaxBytes int `json:"data_max_bytes"`
 
-	// MaxPerMessage Muster sends at most this many; Snooze durations are dropped first.
+	// MaxPerMessage Muster sends at most this many, dropping Snooze buttons first: the Snooze presets, then the durations from the longest.
 	MaxPerMessage int `json:"max_per_message"`
 	MaxPerRow     int `json:"max_per_row"`
 

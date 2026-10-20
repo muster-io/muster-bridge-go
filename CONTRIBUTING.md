@@ -88,4 +88,4 @@ which states its licence in `info.license`, are exempt. `make lint` names every 
 
 release-please keeps a release pull request open, with the changelog written from the conventional commits on
 `master`. Merging it creates the release and its `vX.Y.Z` tag, which Go modules use directly; the workflow then asks
-the Go module proxy for the new version. Versions stay `0.x` until Muster's first release.
+the Go module proxy for the new version. Versions stay `0.x` until Muster 1.0.
