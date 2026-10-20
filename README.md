@@ -17,8 +17,8 @@ this repository keeps a byte-for-byte copy.
 go get github.com/muster-io/muster-bridge-go@latest
 ```
 
-Go 1.26 or newer. The package is `bridge`. Versions stay `0.x` until Muster's first release; then `1.x` speaks
-protocol version 1.
+Go 1.26 or newer. The package is `bridge`. Versions stay `0.x` until Muster 1.0. Every `0.x` release speaks
+protocol version 1; a breaking protocol change would be a new protocol version, not a new library version.
 
 ## Quick start
 
