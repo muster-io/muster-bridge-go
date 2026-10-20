@@ -7,6 +7,12 @@
   rangeStrategy: "pin",
   postUpdateOptions: ["gomodTidy"],
   dependencyDashboard: true,
+  // Dependency updates are committed as `build(deps): …`, which release-please lists under "Dependencies" instead of
+  // "Bug Fixes". config:best-practices types every update `chore` and the runtime dependencies `fix` through package
+  // rules, which a top-level semanticCommitType cannot override: the rules at the end of packageRules replace `fix`
+  // with `build`, and the other updates stay `chore`, outside the changelog and without a release of their own.
+  semanticCommits: "enabled",
+  semanticCommitScope: "deps",
   // Version policy, as in Muster's repository: routine updates arrive once a week, grouped per ecosystem, and merge
   // themselves when every required check passes. Major updates wait in the Dependency Dashboard until a maintainer
   // ticks them. Security fixes are not held by the schedule.
@@ -55,6 +61,14 @@
     {
       matchDatasources: ["golang-version"],
       enabled: false,
+    },
+    {
+      matchDepTypes: ["require"],
+      semanticCommitType: "build",
+    },
+    {
+      matchJsonata: ["isLockfileUpdate = true"],
+      semanticCommitType: "chore",
     },
   ],
   lockFileMaintenance: {
