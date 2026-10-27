@@ -14,7 +14,7 @@ TOOLS := $(BIN)/tools
 GO_TOOLCHAIN = $(shell $(GO) env GOVERSION)
 GOLANGCI_LINT_PKG := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 # renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
-GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT_VERSION := v2.15.0
 GOLANGCI_LINT := $(TOOLS)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 GO_LICENSES_PKG := github.com/google/go-licenses/v2
 # renovate: datasource=go depName=github.com/google/go-licenses/v2
@@ -22,11 +22,11 @@ GO_LICENSES_VERSION := v2.0.1
 GO_LICENSES := $(TOOLS)/go-licenses-$(GO_LICENSES_VERSION)
 GOVULNCHECK_PKG := golang.org/x/vuln/cmd/govulncheck
 # renovate: datasource=go depName=golang.org/x/vuln
-GOVULNCHECK_VERSION := v1.8.0
+GOVULNCHECK_VERSION := v1.9.0
 GOVULNCHECK := $(TOOLS)/govulncheck-$(GOVULNCHECK_VERSION)
 OAPI_CODEGEN_PKG := github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
 # renovate: datasource=go depName=github.com/oapi-codegen/oapi-codegen/v2
-OAPI_CODEGEN_VERSION := v2.8.0
+OAPI_CODEGEN_VERSION := v2.8.1
 OAPI_CODEGEN := $(TOOLS)/oapi-codegen-$(OAPI_CODEGEN_VERSION)
 
 MUSTER_SPEC_URL ?= https://raw.githubusercontent.com/muster-io/muster/master/api/bridge.yaml
