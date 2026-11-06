@@ -1015,3 +1015,19 @@ func TestInvalidLayoutKeyInAnyCaseIsDropped(t *testing.T) {
 		t.Fatalf("the messenger got layout %+v", in.Layout)
 	}
 }
+
+func TestValidLayoutSurvivesStrayLayoutKey(t *testing.T) {
+	b, m, _, _ := newTestBridge(t, nil)
+	body := withLayout(postBody, layoutJSON)
+	body = strings.TrimSuffix(body, "}") + `,"Layout":{"number":"x"}}`
+	if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), body); rec.Code != http.StatusCreated {
+		t.Fatalf("post answered %d: %s", rec.Code, rec.Body)
+	}
+	var want Layout
+	if err := json.Unmarshal([]byte(layoutJSON), &want); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.recorded()[0].in.(MessageInput).Layout; got == nil || !reflect.DeepEqual(*got, want) {
+		t.Fatalf("layout = %+v, want %+v", got, want)
+	}
+}
