@@ -120,10 +120,16 @@ never reuses an id that Muster still holds.
    returns at once, so you confirm a press to your messenger within its deadline whatever Muster does; give the
    messenger's own update id, so that an update it delivers twice is queued once. A direct message that is an Account
    link token becomes an `account_link` event; any other direct message is ignored.
-5. Turn Mention markers into native mentions or plain names with `bridge.ReplaceMentions`.
-6. For pushes, give a bot a `PushTarget` — the callback URL and the push secret that its Bridge Connection in Muster
+5. Render either `body` or `layout`. A Root message and a test message carry both; `MessageInput.Layout` and
+   `MessageContent.Layout` are nil when Muster sends none (a Storm summary, a Thread reply, a message of a Route's own
+   template), and the bridge then renders `body`. `layout` is plain data whose values the bridge escapes for its
+   messenger; `owner` and `assignees` name people by the `ref` of an entry of `mentions`, `Ref` being nil where the
+   message carries no Mention. A bridge that ignores `layout` keeps working. `Example_layout` in
+   [`example_test.go`](example_test.go) renders one.
+6. Turn Mention markers into native mentions or plain names with `bridge.ReplaceMentions`.
+7. For pushes, give a bot a `PushTarget` — the callback URL and the push secret that its Bridge Connection in Muster
    shows — in `Config.Bots` or later with `b.SetPush`; `b.Close` stops the pushers.
-7. `bridge.NewMemoryStore`, the default `Store`, forgets Idempotency-Keys and queued events on a restart, and holds a
+8. `bridge.NewMemoryStore`, the default `Store`, forgets Idempotency-Keys and queued events on a restart, and holds a
    day of events and answers in memory; implement `Store` over your database to keep them. Long polls and pushes are
    woken in the process that queued an event, so with several processes over one store, run each bot in one process
    only.

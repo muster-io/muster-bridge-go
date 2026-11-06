@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,13 @@ const (
 		`"title":"#42 HighErrorRate",` + linkJSON + `,"body":"b","buttons":[],"mentions":[],"notify":true}`
 	editBody = `{"status":"acknowledged","color":"#f57c00","emoji":"x","title":"#42 HighErrorRate",` + linkJSON +
 		`,"body":"b","buttons":[]}`
+	layoutJSON = `{"number":42,"title":"HighErrorRate","status":{"key":"firing","word":"Firing"},` +
+		`"summary":"","description":"5xx above 5%","fields":[{"name":"Severity","value":"critical"}],` +
+		`"labels":[{"key":"service","value":"api"}],` +
+		`"alerts":{"label":"pod","total":3,"values":[{"value":"api-1","resolved":false},{"value":"api-2","resolved":true}]},` +
+		`"assignees":[{"name":"Bob","ref":null}],"owner":{"name":"Alice","ref":"a1","team":{"name":"SRE"}},` +
+		`"notices":["Reopened ×2"],"links":[{"label":"Open in Muster","url":"https://muster.example.org/alert-groups/1"},` +
+		`{"label":"Dashboard","url":"https://grafana.example.org/d/п"}]}`
 	replyBody = `{"thread_ref":null,"body":"b","buttons":[],"mentions":[],"notify":false}`
 	dmBody    = `{"user_external_id":"u-alice","body":"Your code is 123456."}`
 )
@@ -871,5 +879,81 @@ func TestUnreadableBody(t *testing.T) {
 	b.Handler().ServeHTTP(rec, r)
 	if p := wantProblem(t, rec, http.StatusBadRequest, ClassInvalid); detailOf(p) != "Reading the request body failed." {
 		t.Fatalf("detail %q", detailOf(p))
+	}
+}
+
+// withLayout is a request body with a "layout" added.
+func withLayout(body, layout string) string {
+	return strings.TrimSuffix(body, "}") + `,"layout":` + layout + "}"
+}
+
+func TestMessengerReceivesLayout(t *testing.T) {
+	b, m, _, _ := newTestBridge(t, nil)
+	h := b.Handler()
+	if rec := do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k1"), withLayout(postBody, layoutJSON)); rec.Code != http.StatusCreated {
+		t.Fatalf("post answered %d: %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, http.MethodPatch, "/v1/messages/m1", tokenMain, nil, withLayout(editBody, layoutJSON)); rec.Code != http.StatusOK {
+		t.Fatalf("edit answered %d: %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k2"), postBody); rec.Code != http.StatusCreated {
+		t.Fatalf("post without layout answered %d: %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, http.MethodPatch, "/v1/messages/m1", tokenMain, nil, editBody); rec.Code != http.StatusOK {
+		t.Fatalf("edit without layout answered %d: %s", rec.Code, rec.Body)
+	}
+	var want Layout
+	if err := json.Unmarshal([]byte(layoutJSON), &want); err != nil {
+		t.Fatal(err)
+	}
+	calls := m.recorded()
+	if len(calls) != 4 {
+		t.Fatalf("the messenger got %d calls, want 4", len(calls))
+	}
+	for i, c := range calls {
+		var got *Layout
+		switch in := c.in.(type) {
+		case MessageInput:
+			got = in.Layout
+		case MessageContent:
+			got = in.Layout
+		default:
+			t.Fatalf("call %d: unexpected input %T", i, c.in)
+		}
+		if i < 2 {
+			if got == nil || !reflect.DeepEqual(*got, want) {
+				t.Fatalf("call %d (%s): layout = %+v, want %+v", i, c.method, got, want)
+			}
+		} else if got != nil {
+			t.Fatalf("call %d (%s): layout = %+v, want nil", i, c.method, got)
+		}
+	}
+	l := calls[0].in.(MessageInput).Layout
+	if l.Owner == nil || l.Owner.Ref == nil || *l.Owner.Ref != "a1" || l.Assignees[0].Ref != nil ||
+		l.Alerts == nil || l.Alerts.Total != 3 || l.Status.Key != LayoutStatusKeyFiring {
+		t.Fatalf("layout decoded wrongly: %+v", l)
+	}
+}
+
+func TestInvalidLayoutIsRefused(t *testing.T) {
+	for name, layout := range map[string]string{
+		"not an object":        `"x"`,
+		"missing number":       strings.Replace(layoutJSON, `"number":42,`, "", 1),
+		"unknown status":       strings.Replace(layoutJSON, `"firing"`, `"burning"`, 1),
+		"bad ref":              strings.Replace(layoutJSON, `"ref":"a1"`, `"ref":"A 1"`, 1),
+		"link without url":     strings.Replace(layoutJSON, `"url":"https://muster.example.org/alert-groups/1"`, `"u":1`, 1),
+		"alerts without total": strings.Replace(layoutJSON, `"total":3,`, "", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, m, _, _ := newTestBridge(t, nil)
+			h := b.Handler()
+			wantProblem(t, do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k1"), withLayout(postBody, layout)),
+				http.StatusBadRequest, ClassInvalid)
+			wantProblem(t, do(t, h, http.MethodPatch, "/v1/messages/m1", tokenMain, nil, withLayout(editBody, layout)),
+				http.StatusBadRequest, ClassInvalid)
+			if n := len(m.recorded()); n != 0 {
+				t.Fatalf("the messenger was called %d times", n)
+			}
+		})
 	}
 }
