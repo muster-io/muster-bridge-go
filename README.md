@@ -124,7 +124,9 @@ never reuses an id that Muster still holds.
    `MessageContent.Layout` are nil when Muster sends none (a Storm summary, a Thread reply, a message of a Route's own
    template), and the bridge then renders `body`. `layout` is plain data whose values the bridge escapes for its
    messenger; `owner` and `assignees` name people by the `ref` of an entry of `mentions`, `Ref` being nil where the
-   message carries no Mention. A bridge that ignores `layout` keeps working. `Example_layout` in
+   message carries no Mention. A bridge that ignores `layout` keeps working, and so does one that gets a `layout` the specification does not
+   accept (a status key of a later Muster, a missing `ref`): the library drops it, logs a warning with where and why
+   and passes nil, while an error anywhere else still answers `invalid`. `Example_layout` in
    [`example_test.go`](example_test.go) renders one.
 6. Turn Mention markers into native mentions or plain names with `bridge.ReplaceMentions`.
 7. For pushes, give a bot a `PushTarget` — the callback URL and the push secret that its Bridge Connection in Muster
