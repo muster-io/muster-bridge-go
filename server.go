@@ -428,7 +428,7 @@ func (c *call) read() bool {
 	}
 	c.body = body
 	if err := c.b.validateRequest(c.ctx, c.op, c.r, body); err != nil {
-		rest, ok := c.withoutLayout(body)
+		rest, ok := c.withoutLayout(body, true)
 		if !ok || c.b.validateRequest(c.ctx, c.op, c.r, rest) != nil {
 			c.b.writeError(c.w, InvalidError(requestProblem(err)))
 			return false
@@ -436,13 +436,19 @@ func (c *call) read() bool {
 		c.log(slog.LevelWarn, "bridge: layout dropped, the message is sent without it",
 			slog.String("reason", c.b.redact(requestProblem(err))))
 		c.body = rest
+		return true
+	}
+	if rest, ok := c.withoutLayout(body, false); ok {
+		c.body = rest
 	}
 	return true
 }
 
-// withoutLayout is the body of a message without its layout, for the operations that carry one. A layout that does
-// not match the specification is dropped and the message goes on, because a bridge that ignores layout is unaffected.
-func (c *call) withoutLayout(body []byte) ([]byte, bool) {
+// withoutLayout is the body of a message without a layout key, for the operations that carry one. With exact, the
+// key "layout" goes too: a layout that does not match the specification is dropped and the message goes on, because
+// a bridge that ignores layout is unaffected. Without it only the spellings other than "layout" go, because
+// json.Unmarshal matches keys without regard to case and would decode a stray "Layout" that nothing has checked.
+func (c *call) withoutLayout(body []byte, exact bool) ([]byte, bool) {
 	if c.op.id != opPostMessage && c.op.id != opEditMessage {
 		return nil, false
 	}
@@ -450,10 +456,16 @@ func (c *call) withoutLayout(body []byte) ([]byte, bool) {
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return nil, false
 	}
-	if _, ok := fields["layout"]; !ok {
+	found := false
+	for k := range fields {
+		if strings.EqualFold(k, "layout") && (exact || k != "layout") {
+			delete(fields, k)
+			found = true
+		}
+	}
+	if !found {
 		return nil, false
 	}
-	delete(fields, "layout")
 	rest, err := json.Marshal(fields)
 	return rest, err == nil
 }

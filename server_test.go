@@ -1004,3 +1004,14 @@ func TestAcceptsLargeEscapedRequest(t *testing.T) {
 		t.Fatal("the messenger was not called")
 	}
 }
+
+func TestInvalidLayoutKeyInAnyCaseIsDropped(t *testing.T) {
+	b, m, _, _ := newTestBridge(t, nil)
+	body := strings.TrimSuffix(postBody, "}") + `,"Layout":{"number":"x"}}`
+	if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), body); rec.Code != http.StatusCreated {
+		t.Fatalf("post answered %d: %s", rec.Code, rec.Body)
+	}
+	if in := m.recorded()[0].in.(MessageInput); in.Layout != nil {
+		t.Fatalf("the messenger got layout %+v", in.Layout)
+	}
+}
