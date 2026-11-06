@@ -336,7 +336,7 @@ func Example_layout() {
 
 	// A test message has the mark of a test as its first notice.
 	test := strings.Replace(body, `"kind":"root"`, `"kind":"test"`, 1)
-	test = strings.Replace(test, `"notices":["Reopened ×2"]`, `"notices":["This is a test message","Reopened ×2"]`, 1)
+	test = strings.Replace(test, `"notices":["Reopened ×2"]`, `"notices":["🧪 Test message","Reopened ×2"]`, 1)
 	post("k2", test)
 	fmt.Println(renderLayout(n.messages[1]))
 	// Output:
@@ -354,7 +354,7 @@ func Example_layout() {
 	// **#42 HighErrorRate**
 	// 201
 	// Acknowledged HighErrorRate
-	// This is a test message
+	// 🧪 Test message
 	// Reopened ×2
 	// Number: 42
 	// Smoke test
