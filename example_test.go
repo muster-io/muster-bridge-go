@@ -263,7 +263,15 @@ func renderLayout(in bridge.MessageInput) string {
 	var lines []string
 	add := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
 	add("%s %s", l.Status.Word, l.Title)
+	// The notices come first: the mark of a test message is the first notice, and a reader must see it before the content.
+	lines = append(lines, l.Notices...)
 	add("Number: %d", l.Number)
+	if l.Summary != "" {
+		lines = append(lines, l.Summary)
+	}
+	if l.Description != "" {
+		lines = append(lines, l.Description)
+	}
 	for _, f := range l.Fields {
 		add("%s: %s", f.Name, f.Value)
 	}
@@ -287,7 +295,9 @@ func renderLayout(in bridge.MessageInput) string {
 	for _, p := range l.Assignees {
 		add("Paged: %s", person(p))
 	}
-	lines = append(lines, l.Notices...)
+	for _, link := range l.Links {
+		add("%s: %s", link.Label, link.Url)
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -304,30 +314,54 @@ func Example_layout() {
 		`"body":"**#42 HighErrorRate**","buttons":[],"notify":true,` +
 		`"mentions":[{"ref":"a1","external_id":"U1","display_name":"Alice"}],` +
 		`"layout":{"number":42,"title":"HighErrorRate","status":{"key":"acknowledged","word":"Acknowledged"},` +
-		`"summary":"","description":"","fields":[{"name":"Severity","value":"critical"}],` +
+		`"summary":"Smoke test","description":"5xx above 5%","fields":[{"name":"Severity","value":"critical"}],` +
 		`"labels":[{"key":"service","value":"api"}],` +
 		`"alerts":{"label":"pod","total":9,"values":[{"value":"api-1","resolved":false},{"value":"api-2","resolved":false}]},` +
 		`"assignees":[],"owner":{"name":"Alice Smith","ref":"a1"},"notices":["Reopened ×2"],` +
 		`"links":[{"label":"Open in Muster","url":"https://muster.example.org/alert-groups/42"}]}}`
-	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/messages", strings.NewReader(body))
-	r.Header.Set("Authorization", "Bearer example-token")
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Idempotency-Key", "k1")
-	w := httptest.NewRecorder()
-	b.Handler().ServeHTTP(w, r)
-	fmt.Println(w.Code)
-
+	post := func(key, body string) {
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/messages",
+			strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer example-token")
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Idempotency-Key", key)
+		w := httptest.NewRecorder()
+		b.Handler().ServeHTTP(w, r)
+		fmt.Println(w.Code)
+	}
+	post("k1", body)
 	fmt.Println(renderLayout(n.messages[0]))
 	n.messages[0].Layout = nil
 	fmt.Println(renderLayout(n.messages[0]))
+
+	// A test message has the mark of a test as its first notice.
+	test := strings.Replace(body, `"kind":"root"`, `"kind":"test"`, 1)
+	test = strings.Replace(test, `"notices":["Reopened ×2"]`, `"notices":["This is a test message","Reopened ×2"]`, 1)
+	post("k2", test)
+	fmt.Println(renderLayout(n.messages[1]))
 	// Output:
 	// 201
 	// Acknowledged HighErrorRate
+	// Reopened ×2
 	// Number: 42
+	// Smoke test
+	// 5xx above 5%
 	// Severity: critical
 	// service=api
 	// pod: api-1, api-2 and 7 more
 	// Acknowledged by @U1
-	// Reopened ×2
+	// Open in Muster: https://muster.example.org/alert-groups/42
 	// **#42 HighErrorRate**
+	// 201
+	// Acknowledged HighErrorRate
+	// This is a test message
+	// Reopened ×2
+	// Number: 42
+	// Smoke test
+	// 5xx above 5%
+	// Severity: critical
+	// service=api
+	// pod: api-1, api-2 and 7 more
+	// Acknowledged by @U1
+	// Open in Muster: https://muster.example.org/alert-groups/42
 }
