@@ -47,9 +47,9 @@ const (
 
 const (
 	// maxRequestBytes is the library's cap on a request body. A message carries its content twice, as body and as
-	// layout, and Muster's JSON escaping writes up to 6 bytes for one character (\u003c for <, >, & and U+2028, \u00XX
-	// for a control). At the largest max_body_length, 100000 characters, that is 600 000 bytes a copy, about 1.2 MB with
-	// the rest of the envelope, so 2.4 MB for the two; 4 MiB leaves room for that and for the mentions and buttons.
+	// layout, and Go's json.Marshal writes 6 bytes for one of <, >, &, U+2028, U+2029 and a control character (\u003c).
+	// At the largest max_body_length, 100000 characters, that is 600 000 bytes a copy and about 1.2 MB a request,
+	// already over 1 MiB; 4 MiB leaves a wide margin for the rest of the envelope.
 	maxRequestBytes = 4 << 20
 	keyClaimTTL     = 2 * time.Minute
 	keyRetention    = 24 * time.Hour
