@@ -46,8 +46,11 @@ const (
 )
 
 const (
-	// maxRequestBytes is the library's cap on a request body, which leaves room for any max_body_length New accepts.
-	maxRequestBytes = 1 << 20
+	// maxRequestBytes is the library's cap on a request body. A message carries its content twice, as body and as
+	// layout, and Muster's JSON escaping writes up to 6 bytes for one character (\u003c for <, >, & and U+2028, \u00XX
+	// for a control). At the largest max_body_length, 100000 characters, that is 600 000 bytes a copy, about 1.2 MB with
+	// the rest of the envelope, so 2.4 MB for the two; 4 MiB leaves room for that and for the mentions and buttons.
+	maxRequestBytes = 4 << 20
 	keyClaimTTL     = 2 * time.Minute
 	keyRetention    = 24 * time.Hour
 	maxChannelName  = 200
@@ -417,7 +420,7 @@ func (c *call) read() bool {
 		if body, err = io.ReadAll(http.MaxBytesReader(c.w, c.r.Body, maxRequestBytes)); err != nil {
 			detail := "Reading the request body failed."
 			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-				detail = "The request body exceeds 1 MiB, the most this bridge reads."
+				detail = "The request body exceeds 4 MiB, the most this bridge reads."
 			}
 			c.b.writeError(c.w, InvalidError(detail))
 			return false
@@ -425,10 +428,34 @@ func (c *call) read() bool {
 	}
 	c.body = body
 	if err := c.b.validateRequest(c.ctx, c.op, c.r, body); err != nil {
-		c.b.writeError(c.w, InvalidError(requestProblem(err)))
-		return false
+		rest, ok := c.withoutLayout(body)
+		if !ok || c.b.validateRequest(c.ctx, c.op, c.r, rest) != nil {
+			c.b.writeError(c.w, InvalidError(requestProblem(err)))
+			return false
+		}
+		c.log(slog.LevelWarn, "bridge: layout dropped, the message is sent without it",
+			slog.String("reason", c.b.redact(requestProblem(err))))
+		c.body = rest
 	}
 	return true
+}
+
+// withoutLayout is the body of a message without its layout, for the operations that carry one. A layout that does
+// not match the specification is dropped and the message goes on, because a bridge that ignores layout is unaffected.
+func (c *call) withoutLayout(body []byte) ([]byte, bool) {
+	if c.op.id != opPostMessage && c.op.id != opEditMessage {
+		return nil, false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, false
+	}
+	if _, ok := fields["layout"]; !ok {
+		return nil, false
+	}
+	delete(fields, "layout")
+	rest, err := json.Marshal(fields)
+	return rest, err == nil
 }
 
 func (b *Bridge) validateRequest(ctx context.Context, op *operation, r *http.Request, body []byte) error {

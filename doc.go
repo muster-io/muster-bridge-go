@@ -53,8 +53,9 @@
 // An operation the bridge does not offer answers 404 invalid. [New] refuses a configuration whose features need an
 // interface the Messenger lacks.
 //
-// Before it calls the Messenger, the library refuses as 400 invalid a request that does not match the specification,
-// a request body over 1 MiB, a body longer than Limits.MaxBodyLength characters, buttons sent to a bridge without
+// Before it calls the Messenger, the library refuses as 400 invalid a request that does not match the specification
+// (except for a layout that alone does not match: see Layout),
+// a request body over 4 MiB, a body longer than Limits.MaxBodyLength characters, buttons sent to a bridge without
 // buttons, more buttons than MaxPerMessage and button data longer than DataMaxBytes. It checks every answer of the
 // Messenger against the specification too; one that does not match is logged and answered as transient.
 //
@@ -85,7 +86,9 @@
 // Body or Layout; one that ignores Layout is unaffected, and one that renders Layout renders Body when Layout is nil,
 // as it is for a Storm summary, a Thread reply, a Root message that a template of the Route renders, and a message of
 // an earlier version of Muster. The library passes Layout to [Messenger.PostMessage] and [Messenger.EditMessage]
-// unchanged, after it has checked it against the specification. Its values are plain text, never CommonMark: the
+// unchanged, after it has checked it against the specification. A Layout that does not match it, while the rest of the
+// request does, is dropped: the message is accepted, the Messenger gets a nil Layout and renders Body, and the library
+// logs one warning with where and why, never the content. Its values are plain text, never CommonMark: the
 // bridge escapes them for its messenger. [Layout.Assignees] and [Layout.Owner] name people by the Ref of an entry of
 // the envelope's Mentions, never by a marker in the text; Ref is nil where the message carries no Mention of the
 // person, and always in an edit, and the bridge then writes the Name. The test mark of a test message is the first of

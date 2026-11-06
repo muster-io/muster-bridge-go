@@ -322,18 +322,18 @@ func TestRefusesSpecMismatch(t *testing.T) {
 	}
 }
 
-func TestRefusesBodyOverOneMiB(t *testing.T) {
+func TestRefusesBodyOverFourMiB(t *testing.T) {
 	b, m, _, _ := newTestBridge(t, nil)
 	padded := func(n int) string { return postBody + strings.Repeat(" ", n-len(postBody)) }
-	if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), padded(1<<20)); rec.Code != http.StatusCreated {
-		t.Fatalf("a body of 1 MiB answered %d: %s", rec.Code, rec.Body)
+	if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), padded(4<<20)); rec.Code != http.StatusCreated {
+		t.Fatalf("a body of 4 MiB answered %d: %s", rec.Code, rec.Body)
 	}
-	rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k2"), padded(1<<20+1))
-	if p := wantProblem(t, rec, http.StatusBadRequest, ClassInvalid); detailOf(p) != "The request body exceeds 1 MiB, the most this bridge reads." {
+	rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k2"), padded(4<<20+1))
+	if p := wantProblem(t, rec, http.StatusBadRequest, ClassInvalid); detailOf(p) != "The request body exceeds 4 MiB, the most this bridge reads." {
 		t.Fatalf("detail %q", detailOf(p))
 	}
 	if m.count("PostMessage") != 1 {
-		t.Fatal("the messenger was called for the body over 1 MiB")
+		t.Fatal("the messenger was called for the body over 4 MiB")
 	}
 }
 
@@ -935,7 +935,7 @@ func TestMessengerReceivesLayout(t *testing.T) {
 	}
 }
 
-func TestInvalidLayoutIsRefused(t *testing.T) {
+func TestInvalidLayoutIsDropped(t *testing.T) {
 	for name, layout := range map[string]string{
 		"not an object":        `"x"`,
 		"missing number":       strings.Replace(layoutJSON, `"number":42,`, "", 1),
@@ -945,15 +945,62 @@ func TestInvalidLayoutIsRefused(t *testing.T) {
 		"alerts without total": strings.Replace(layoutJSON, `"total":3,`, "", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
-			b, m, _, _ := newTestBridge(t, nil)
+			b, m, _, logs := newTestBridge(t, nil)
 			h := b.Handler()
-			wantProblem(t, do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k1"), withLayout(postBody, layout)),
-				http.StatusBadRequest, ClassInvalid)
-			wantProblem(t, do(t, h, http.MethodPatch, "/v1/messages/m1", tokenMain, nil, withLayout(editBody, layout)),
-				http.StatusBadRequest, ClassInvalid)
-			if n := len(m.recorded()); n != 0 {
-				t.Fatalf("the messenger was called %d times", n)
+			if rec := do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k1"), withLayout(postBody, layout)); rec.Code != http.StatusCreated {
+				t.Fatalf("post answered %d: %s", rec.Code, rec.Body)
+			}
+			if rec := do(t, h, http.MethodPatch, "/v1/messages/m1", tokenMain, nil, withLayout(editBody, layout)); rec.Code != http.StatusOK {
+				t.Fatalf("edit answered %d: %s", rec.Code, rec.Body)
+			}
+			calls := m.recorded()
+			if len(calls) != 2 {
+				t.Fatalf("the messenger got %d calls, want 2", len(calls))
+			}
+			if in := calls[0].in.(MessageInput); in.Layout != nil || in.Body != "b" {
+				t.Fatalf("post got layout %+v, body %q", in.Layout, in.Body)
+			}
+			if in := calls[1].in.(MessageContent); in.Layout != nil || in.Body != "b" {
+				t.Fatalf("edit got layout %+v, body %q", in.Layout, in.Body)
+			}
+			log := logs.String()
+			if n := strings.Count(log, "layout dropped"); n != 2 {
+				t.Fatalf("%d warnings, want 2: %s", n, log)
+			}
+			if strings.Contains(log, "HighErrorRate") || strings.Contains(log, "5xx above") {
+				t.Fatalf("the warning carries the content: %s", log)
 			}
 		})
+	}
+}
+
+func TestInvalidBodyWithLayoutIsRefused(t *testing.T) {
+	b, m, _, _ := newTestBridge(t, nil)
+	h := b.Handler()
+	bad := strings.Replace(postBody, `"status":"firing"`, `"status":"burning"`, 1)
+	badEdit := strings.Replace(editBody, `"status":"acknowledged"`, `"status":"burning"`, 1)
+	for _, layout := range []string{layoutJSON, `"x"`} {
+		wantProblem(t, do(t, h, http.MethodPost, "/v1/messages", tokenMain, key("k1"), withLayout(bad, layout)),
+			http.StatusBadRequest, ClassInvalid)
+		wantProblem(t, do(t, h, http.MethodPatch, "/v1/messages/m1", tokenMain, nil, withLayout(badEdit, layout)),
+			http.StatusBadRequest, ClassInvalid)
+	}
+	if n := len(m.recorded()); n != 0 {
+		t.Fatalf("the messenger was called %d times", n)
+	}
+}
+
+func TestAcceptsLargeEscapedRequest(t *testing.T) {
+	b, m, _, _ := newTestBridge(t, func(c *Config) { c.Limits.MaxBodyLength = 100000 })
+	pad := strings.Repeat(`\u003c`, 100000)
+	body := strings.Replace(postBody, `"body":"b"`, `"body":"`+pad+`"`, 1)
+	layout := strings.Replace(layoutJSON, `"description":"5xx above 5%"`, `"description":"`+pad+`"`, 1)
+	body = withLayout(body, layout)
+	body += strings.Repeat(" ", 2_500_000-len(body))
+	if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), body); rec.Code != http.StatusCreated {
+		t.Fatalf("a request of %d bytes answered %d: %.300s", len(body), rec.Code, rec.Body)
+	}
+	if m.count("PostMessage") != 1 {
+		t.Fatal("the messenger was not called")
 	}
 }
