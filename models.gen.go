@@ -181,6 +181,30 @@ func (e InfoUserLookup) Valid() bool {
 	}
 }
 
+// Defines values for LayoutStatusKey.
+const (
+	LayoutStatusKeyAcknowledged LayoutStatusKey = "acknowledged"
+	LayoutStatusKeyFiring       LayoutStatusKey = "firing"
+	LayoutStatusKeyResolved     LayoutStatusKey = "resolved"
+	LayoutStatusKeySnoozed      LayoutStatusKey = "snoozed"
+)
+
+// Valid indicates whether the value is a known member of the LayoutStatusKey enum.
+func (e LayoutStatusKey) Valid() bool {
+	switch e {
+	case LayoutStatusKeyAcknowledged:
+		return true
+	case LayoutStatusKeyFiring:
+		return true
+	case LayoutStatusKeyResolved:
+		return true
+	case LayoutStatusKeySnoozed:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MessageKind.
 const (
 	MessageKindRoot         MessageKind = "root"
@@ -455,6 +479,118 @@ type InfoProtocolVersion string
 // InfoUserLookup What a person enters to be found for an Account link by code, and what `findUsers` searches by. `none` offers only the token sent to the bot.
 type InfoUserLookup string
 
+// Layout The content of a Root message or a test message as structured data, for a bridge that renders it natively
+// instead of rendering `body`: the same content in the same order, without the buttons, which stay in `buttons`.
+// Muster sends it only when this is the whole content: a Root message that a Route's own Root message template
+// or line template, or Muster's fallback template, renders has no `layout`, and the bridge renders its `body`.
+// A test message has the mark of a test as its first notice, as `body` has it first.
+// Every value is plain text, never CommonMark — the bridge escapes it for its messenger — and alert data in it
+// cannot mention anyone. When Muster shortens `body` to `limits.max_body_length`, `layout` loses the same parts:
+// the description first, then the Alerts, the summary and the labels, while the title, the status, the fields,
+// the people and the links always stay; a bridge that has to cut more cuts in the same order.
+type Layout struct {
+	// Alerts The Alerts by the label that tells them apart; null for an Alert Group of one Alert, or when shortening removed them.
+	Alerts *LayoutAlerts `json:"alerts"`
+
+	// Assignees The people Paged for the Alert Group, before an acknowledgement; empty until Muster Pages people through Escalation chains.
+	Assignees []LayoutPerson `json:"assignees"`
+
+	// Description The `description` annotation of the first Alert that has one; empty when there is none, or when shortening removed it.
+	Description string `json:"description"`
+
+	// Fields Severity, Route, Teams (left out when the Alert Group has none) and Started, in order.
+	Fields []LayoutField `json:"fields"`
+
+	// Labels The key labels the Route shows in its messages, each as key and value; the value of a label whose values differ among the firing Alerts says how many there are, "3 values" in the Route's language.
+	Labels []LayoutLabel `json:"labels"`
+
+	// Links The links, "Open in Muster" to the Alert Group page first.
+	Links []LayoutLink `json:"links"`
+
+	// Notices The notices that apply, such as "Reopened ×2", then the footer — who snoozed or resolved the Alert Group, or why it resolved — each as a line. Who acknowledged it is `owner`, not a line.
+	Notices []string `json:"notices"`
+
+	// Number The Alert Group's number alone, without `#`, as a field of its own, because `#N` in text becomes a hashtag in some messengers.
+	Number int `json:"number"`
+
+	// Owner Who acknowledged the Alert Group, while it is acknowledged; null otherwise.
+	Owner  *LayoutPerson `json:"owner"`
+	Status LayoutStatus  `json:"status"`
+
+	// Summary The Alert Group's summary; empty when there is none, or when shortening removed it.
+	Summary string `json:"summary"`
+
+	// Title The Alert Group's title without the number.
+	Title string `json:"title"`
+}
+
+// LayoutAlertValue defines model for LayoutAlertValue.
+type LayoutAlertValue struct {
+	// Resolved The Alert is resolved; Muster strikes its value through in `body`.
+	Resolved bool   `json:"resolved"`
+	Value    string `json:"value"`
+}
+
+// LayoutAlerts defines model for LayoutAlerts.
+type LayoutAlerts struct {
+	// Label The label that tells the Alerts apart.
+	Label string `json:"label"`
+
+	// Total How many Alerts the Alert Group has, listed or not, so that the bridge counts the ones it does not show itself — "…and 7 more" — also when it lists fewer values than `values` holds.
+	Total int `json:"total"`
+
+	// Values Its values, firing Alerts first, at most as many as Muster lists in a message.
+	Values []LayoutAlertValue `json:"values"`
+}
+
+// LayoutField defines model for LayoutField.
+type LayoutField struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// LayoutLabel defines model for LayoutLabel.
+type LayoutLabel struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// LayoutLink defines model for LayoutLink.
+type LayoutLink struct {
+	Label string `json:"label"`
+
+	// Url An absolute http or https link as the Route gives it, the same as the body links; it may be an IRI, with characters outside ASCII in its host or path.
+	Url string `json:"url"`
+}
+
+// LayoutPerson defines model for LayoutPerson.
+type LayoutPerson struct {
+	// Name The person's display name in Muster, which may differ from the `display_name` of their entry in `mentions`, the name of their account in the messenger.
+	Name string `json:"name"`
+
+	// Ref The `ref` of the person's entry in `mentions` where the message carries their Mention — a new message to a bridge with `native_mentions`, for a person whose account is linked through the Connection — so that the bridge mentions them by its own user id; null otherwise, and always in an edit.
+	Ref *string `json:"ref"`
+
+	// Team The person's Team, where Muster knows it.
+	Team *LayoutPerson_Team `json:"team,omitempty"`
+}
+
+// LayoutPerson_Team The person's Team, where Muster knows it.
+type LayoutPerson_Team struct {
+	Name string `json:"name"`
+}
+
+// LayoutStatus defines model for LayoutStatus.
+type LayoutStatus struct {
+	Key LayoutStatusKey `json:"key"`
+
+	// Word The status as a word in the Route's language, "Firing".
+	Word string `json:"word"`
+}
+
+// LayoutStatusKey defines model for LayoutStatus.Key.
+type LayoutStatusKey string
+
 // Limits defines model for Limits.
 type Limits struct {
 	// EditMaxAgeSeconds How long after posting the bot can still edit a message; `null` when edits never expire. Muster stops editing a minute earlier.
@@ -487,7 +623,7 @@ type Mention struct {
 	Ref string `json:"ref"`
 }
 
-// MessageContent defines model for MessageContent.
+// MessageContent The envelope of a message. A Root message and a test message also carry `layout`, the same content as `body` as plain-text data; a bridge renders either `body` or `layout`, and a bridge that ignores `layout` is unaffected. A message without `layout` is rendered from `body`, always — a Storm summary, a Root message whose Route renders it with a Root message template or a line template of its own, or with Muster's fallback template, whose content only `body` holds, or a message of an earlier version of Muster.
 type MessageContent struct {
 	// Body CommonMark, as the description of this protocol says; at most `limits.max_body_length` code points.
 	Body string `json:"body"`
@@ -500,7 +636,18 @@ type MessageContent struct {
 
 	// Emoji The status as an emoji (🔴 🟠 ⚪ 🟢 ⛈), for messengers without colours.
 	Emoji string `json:"emoji"`
-	Link  Link   `json:"link"`
+
+	// Layout The content of a Root message or a test message as structured data, for a bridge that renders it natively
+	// instead of rendering `body`: the same content in the same order, without the buttons, which stay in `buttons`.
+	// Muster sends it only when this is the whole content: a Root message that a Route's own Root message template
+	// or line template, or Muster's fallback template, renders has no `layout`, and the bridge renders its `body`.
+	// A test message has the mark of a test as its first notice, as `body` has it first.
+	// Every value is plain text, never CommonMark — the bridge escapes it for its messenger — and alert data in it
+	// cannot mention anyone. When Muster shortens `body` to `limits.max_body_length`, `layout` loses the same parts:
+	// the description first, then the Alerts, the summary and the labels, while the title, the status, the fields,
+	// the people and the links always stay; a bridge that has to cut more cuts in the same order.
+	Layout *Layout `json:"layout,omitempty"`
+	Link   Link    `json:"link"`
 
 	// Status The status of the Alert Group the message shows; `storm` for a Storm summary.
 	Status Status `json:"status"`
@@ -541,9 +688,20 @@ type MessageInput struct {
 	Emoji string `json:"emoji"`
 
 	// Kind A Root message of an Alert Group, a Storm summary, or a test message sent from the Destination page.
-	Kind     MessageKind `json:"kind"`
-	Link     Link        `json:"link"`
-	Mentions []Mention   `json:"mentions"`
+	Kind MessageKind `json:"kind"`
+
+	// Layout The content of a Root message or a test message as structured data, for a bridge that renders it natively
+	// instead of rendering `body`: the same content in the same order, without the buttons, which stay in `buttons`.
+	// Muster sends it only when this is the whole content: a Root message that a Route's own Root message template
+	// or line template, or Muster's fallback template, renders has no `layout`, and the bridge renders its `body`.
+	// A test message has the mark of a test as its first notice, as `body` has it first.
+	// Every value is plain text, never CommonMark — the bridge escapes it for its messenger — and alert data in it
+	// cannot mention anyone. When Muster shortens `body` to `limits.max_body_length`, `layout` loses the same parts:
+	// the description first, then the Alerts, the summary and the labels, while the title, the status, the fields,
+	// the people and the links always stay; a bridge that has to cut more cuts in the same order.
+	Layout   *Layout   `json:"layout,omitempty"`
+	Link     Link      `json:"link"`
+	Mentions []Mention `json:"mentions"`
 
 	// Notify Loud (`true`) or Quiet (`false`).
 	Notify bool `json:"notify"`

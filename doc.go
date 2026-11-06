@@ -8,7 +8,7 @@
 // channels, look up people, send direct messages and answer people; the bridge reports what people do in the messenger
 // — button presses, messages in Threads, deleted messages, Account link tokens — as events that Muster polls or that
 // the bridge pushes. The protocol is api/bridge.yaml of Muster's repository; this package embeds a byte-for-byte copy
-// of it, generates its Go types from it (Info, Capabilities, Limits, MessageInput, MessageContent, ThreadReplyInput,
+// of it, generates its Go types from it (Info, Capabilities, Limits, MessageInput, MessageContent, Layout, ThreadReplyInput,
 // Person, Problem, the events and the rest) and validates every request and answer against it.
 //
 // The library does the protocol: the bots' tokens, request validation and the bridge's limits, Idempotency-Keys,
@@ -77,6 +77,19 @@
 // transient, logged as a mistake of the bridge. Any other error, and a panic, is transient with the detail "The bridge
 // could not reach its messenger.", and logged at level error. The library never logs a token, a push secret or an
 // Account link token, and replaces the bots' tokens and push secrets in every detail and log line.
+//
+// # Layout
+//
+// A [MessageInput] and a [MessageContent] carry the message twice: as CommonMark in Body, and, for a Root message and a
+// test message, as structured data in Layout, a [*Layout] that is nil when Muster sends none. A bridge renders either
+// Body or Layout; one that ignores Layout is unaffected, and one that renders Layout renders Body when Layout is nil,
+// as it is for a Storm summary, a Thread reply, a Root message that a template of the Route renders, and a message of
+// an earlier version of Muster. The library passes Layout to [Messenger.PostMessage] and [Messenger.EditMessage]
+// unchanged, after it has checked it against the specification. Its values are plain text, never CommonMark: the
+// bridge escapes them for its messenger. [Layout.Assignees] and [Layout.Owner] name people by the Ref of an entry of
+// the envelope's Mentions, never by a marker in the text; Ref is nil where the message carries no Mention of the
+// person, and always in an edit, and the bridge then writes the Name. The test mark of a test message is the first of
+// its Notices. A [LayoutLink]'s Url may be an IRI.
 //
 // # Events
 //

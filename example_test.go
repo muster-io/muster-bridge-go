@@ -239,3 +239,95 @@ func ExampleNewMemoryStore() {
 	// true
 	// true 201
 }
+
+// renderLayout writes a message as lines of a messenger from layout, the structured content of a Root message or a
+// test message, and from body when Muster sent no layout. Its values are plain text; a messenger that reads markup
+// would escape them here.
+func renderLayout(in bridge.MessageInput) string {
+	l := in.Layout
+	if l == nil {
+		return in.Body
+	}
+	mentions := map[string]bridge.Mention{}
+	for _, m := range in.Mentions {
+		mentions[m.Ref] = m
+	}
+	person := func(p bridge.LayoutPerson) string {
+		if p.Ref != nil {
+			if m, ok := mentions[*p.Ref]; ok {
+				return "@" + m.ExternalId
+			}
+		}
+		return p.Name
+	}
+	var lines []string
+	add := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	add("%s %s", l.Status.Word, l.Title)
+	add("Number: %d", l.Number)
+	for _, f := range l.Fields {
+		add("%s: %s", f.Name, f.Value)
+	}
+	for _, label := range l.Labels {
+		add("%s=%s", label.Key, label.Value)
+	}
+	if a := l.Alerts; a != nil {
+		values := make([]string, len(a.Values))
+		for i, v := range a.Values {
+			values[i] = v.Value
+		}
+		line := a.Label + ": " + strings.Join(values, ", ")
+		if more := a.Total - len(a.Values); more > 0 {
+			line += fmt.Sprintf(" and %d more", more)
+		}
+		lines = append(lines, line)
+	}
+	if l.Owner != nil {
+		add("Acknowledged by %s", person(*l.Owner))
+	}
+	for _, p := range l.Assignees {
+		add("Paged: %s", person(p))
+	}
+	lines = append(lines, l.Notices...)
+	return strings.Join(lines, "\n")
+}
+
+// A bridge renders either body or layout. Muster sends layout for a Root message and a test message, and a bridge that
+// renders it natively shows the number as a field of its own, the labels as key and value, the Alerts with the count
+// of the ones it does not list, and the Owner as a Mention by the ref of the envelope's mentions.
+func Example_layout() {
+	n := &notebook{}
+	b := newNotebookBridge(n)
+	defer func() { _ = b.Close(context.Background()) }()
+
+	body := `{"channel_id":"alerts","kind":"root","status":"acknowledged","color":"#f57c00","emoji":"x",` +
+		`"title":"#42 HighErrorRate","link":{"url":"https://muster.example.org/alert-groups/42","label":"Open in Muster"},` +
+		`"body":"**#42 HighErrorRate**","buttons":[],"notify":true,` +
+		`"mentions":[{"ref":"a1","external_id":"U1","display_name":"Alice"}],` +
+		`"layout":{"number":42,"title":"HighErrorRate","status":{"key":"acknowledged","word":"Acknowledged"},` +
+		`"summary":"","description":"","fields":[{"name":"Severity","value":"critical"}],` +
+		`"labels":[{"key":"service","value":"api"}],` +
+		`"alerts":{"label":"pod","total":9,"values":[{"value":"api-1","resolved":false},{"value":"api-2","resolved":false}]},` +
+		`"assignees":[],"owner":{"name":"Alice Smith","ref":"a1"},"notices":["Reopened ×2"],` +
+		`"links":[{"label":"Open in Muster","url":"https://muster.example.org/alert-groups/42"}]}}`
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/messages", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer example-token")
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Idempotency-Key", "k1")
+	w := httptest.NewRecorder()
+	b.Handler().ServeHTTP(w, r)
+	fmt.Println(w.Code)
+
+	fmt.Println(renderLayout(n.messages[0]))
+	n.messages[0].Layout = nil
+	fmt.Println(renderLayout(n.messages[0]))
+	// Output:
+	// 201
+	// Acknowledged HighErrorRate
+	// Number: 42
+	// Severity: critical
+	// service=api
+	// pod: api-1, api-2 and 7 more
+	// Acknowledged by @U1
+	// Reopened ×2
+	// **#42 HighErrorRate**
+}
