@@ -48,11 +48,17 @@ func TestEmbeddedSpecLoadsAndValidates(t *testing.T) {
 	}
 }
 
+// gatewayOperations are the operations of the gateway role, which the library does not serve: it is a messenger library.
+var gatewayOperations = map[string]bool{"sendNotification": true}
+
 func TestEveryOperationIsServed(t *testing.T) {
 	doc := testProtocol(t).doc
 	var spec, table []string
 	for path, item := range doc.Paths.Map() {
 		for method, op := range item.Operations() {
+			if gatewayOperations[op.OperationID] {
+				continue
+			}
 			spec = append(spec, method+" "+path+" "+op.OperationID)
 		}
 	}
@@ -74,6 +80,9 @@ func TestDeclaredClassesMatchSpec(t *testing.T) {
 	statusClass := map[string]Class{"400": ClassInvalid, "403": ClassForbidden, "404": ClassGone,
 		"429": ClassRateLimited, "500": ClassTransient}
 	for id, r := range testProtocol(t).routes {
+		if gatewayOperations[id] {
+			continue
+		}
 		var classes []Class
 		for status := range r.route.Operation.Responses.Map() {
 			if c, ok := statusClass[status]; ok {

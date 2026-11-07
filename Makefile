@@ -41,9 +41,10 @@ PUSH_LISTEN := 127.0.0.1:18096
 CONFORMANCE_DIR := $(BIN)/conformance
 CHECK_FLAGS := --token-file /token --channel alerts --forbidden-channel nobot --handle alice
 STEPS := info channel_check post replayed_key buttons edit thread_reply thread_ref forbidden_channel user_lookup \
-	direct_message delete poll press push answer
-RUN1_SKIP := press push
-RUN2_SKIP := buttons user_lookup direct_message delete press push
+	direct_message delete poll press push answer notification notification_acknowledged
+GATEWAY_SKIP := notification notification_acknowledged
+RUN1_SKIP := press push $(GATEWAY_SKIP)
+RUN2_SKIP := buttons user_lookup direct_message delete press push $(GATEWAY_SKIP)
 RUN1_PASS := $(filter-out $(RUN1_SKIP),$(STEPS))
 RUN2_PASS := $(filter-out $(RUN2_SKIP),$(STEPS))
 
@@ -305,7 +306,7 @@ interactive() {
 	status=$$?
 	check=
 	cat "$$dir/$$1.out"
-	verify "$$1" "$$status" "$(STEPS)" ""
+	verify "$$1" "$$status" "$(filter-out $(GATEWAY_SKIP),$(STEPS))" "$(GATEWAY_SKIP)"
 }
 
 echo "== minimal 1: every feature, --no-interactive"
