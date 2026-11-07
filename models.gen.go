@@ -12,10 +12,11 @@ import (
 
 // Defines values for AnswerShownShownAs.
 const (
-	AnswerShownShownAsDirect    AnswerShownShownAs = "direct"
-	AnswerShownShownAsEphemeral AnswerShownShownAs = "ephemeral"
-	AnswerShownShownAsPopup     AnswerShownShownAs = "popup"
-	AnswerShownShownAsThread    AnswerShownShownAs = "thread"
+	AnswerShownShownAsDirect       AnswerShownShownAs = "direct"
+	AnswerShownShownAsEphemeral    AnswerShownShownAs = "ephemeral"
+	AnswerShownShownAsNotification AnswerShownShownAs = "notification"
+	AnswerShownShownAsPopup        AnswerShownShownAs = "popup"
+	AnswerShownShownAsThread       AnswerShownShownAs = "thread"
 )
 
 // Valid indicates whether the value is a known member of the AnswerShownShownAs enum.
@@ -24,6 +25,8 @@ func (e AnswerShownShownAs) Valid() bool {
 	case AnswerShownShownAsDirect:
 		return true
 	case AnswerShownShownAsEphemeral:
+		return true
+	case AnswerShownShownAsNotification:
 		return true
 	case AnswerShownShownAsPopup:
 		return true
@@ -181,6 +184,24 @@ func (e InfoUserLookup) Valid() bool {
 	}
 }
 
+// Defines values for InfoRole.
+const (
+	InfoRoleGateway   InfoRole = "gateway"
+	InfoRoleMessenger InfoRole = "messenger"
+)
+
+// Valid indicates whether the value is a known member of the InfoRole enum.
+func (e InfoRole) Valid() bool {
+	switch e {
+	case InfoRoleGateway:
+		return true
+	case InfoRoleMessenger:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for LayoutStatusKey.
 const (
 	LayoutStatusKeyAcknowledged LayoutStatusKey = "acknowledged"
@@ -220,6 +241,24 @@ func (e MessageKind) Valid() bool {
 	case MessageKindStormSummary:
 		return true
 	case MessageKindTest:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for NotificationInputLanguage.
+const (
+	NotificationInputLanguageEn NotificationInputLanguage = "en"
+	NotificationInputLanguageRu NotificationInputLanguage = "ru"
+)
+
+// Valid indicates whether the value is a known member of the NotificationInputLanguage enum.
+func (e NotificationInputLanguage) Valid() bool {
+	switch e {
+	case NotificationInputLanguageEn:
+		return true
+	case NotificationInputLanguageRu:
 		return true
 	default:
 		return false
@@ -310,11 +349,11 @@ type AnswerInput struct {
 type AnswerShown struct {
 	Replayed bool `json:"replayed"`
 
-	// ShownAs Where the person sees the answer.
+	// ShownAs Where the person sees the answer; `notification` is told in the call or in the reply to the message of a notification.
 	ShownAs AnswerShownShownAs `json:"shown_as"`
 }
 
-// AnswerShownShownAs Where the person sees the answer.
+// AnswerShownShownAs Where the person sees the answer; `notification` is told in the call or in the reply to the message of a notification.
 type AnswerShownShownAs string
 
 // Button defines model for Button.
@@ -413,7 +452,7 @@ type DirectMessageSent struct {
 // ErrorClass defines model for ErrorClass.
 type ErrorClass string
 
-// Event One event; `type` selects the variant. `account_link` events are always sent; the others only with the feature they belong to (`buttons`, `thread_messages`, `deletion_events`).
+// Event One event; `type` selects the variant. A bridge in the role `messenger` always sends `account_link` events and the others only with the feature they belong to (`buttons`, `thread_messages`, `deletion_events`); a bridge in the role `gateway` sends `notification_acknowledged`.
 type Event struct {
 	union json.RawMessage
 }
@@ -454,6 +493,9 @@ type Info struct {
 	// ProtocolVersion The major version of this protocol the bridge speaks.
 	ProtocolVersion InfoProtocolVersion `json:"protocol_version"`
 
+	// Roles What the bridge is (see Roles); `messenger` when it is missing, so a bridge written before roles existed is a messenger.
+	Roles *[]InfoRole `json:"roles,omitempty"`
+
 	// UserLookup What a person enters to be found for an Account link by code, and what `findUsers` searches by. `none` offers only the token sent to the bot.
 	UserLookup InfoUserLookup `json:"user_lookup"`
 }
@@ -478,6 +520,9 @@ type InfoProtocolVersion string
 
 // InfoUserLookup What a person enters to be found for an Account link by code, and what `findUsers` searches by. `none` offers only the token sent to the bot.
 type InfoUserLookup string
+
+// InfoRole `messenger`: a bridge to a messenger, whose channels are Destinations; `gateway`: a Notification gateway, which Muster calls with `sendNotification`.
+type InfoRole string
 
 // Layout The content of a Root message or a test message as structured data, for a bridge that renders it natively
 // instead of rendering `body`: the same content in the same order, without the buttons, which stay in `buttons`.
@@ -734,6 +779,56 @@ type MessagePosted struct {
 	Url *string `json:"url,omitempty"`
 }
 
+// NotificationAcknowledgedEvent defines model for NotificationAcknowledgedEvent.
+type NotificationAcknowledgedEvent struct {
+	// Data The notification's `action.data`, unchanged.
+	Data string `json:"data"`
+
+	// Id Stable across retries and polls; Muster handles each id once. Printable ASCII without spaces, so that it can travel as the `webhook-id` header.
+	Id string `json:"id"`
+
+	// NotificationId The `notification_id` that `sendNotification` answered.
+	NotificationId string `json:"notification_id"`
+
+	// OccurredAt When it happened in the messenger, or when the bridge learned of it.
+	OccurredAt time.Time   `json:"occurred_at"`
+	Type       interface{} `json:"type"`
+}
+
+// NotificationAction How the person acknowledges the notification. Absent when there is nothing to acknowledge, as for a confirmation code.
+type NotificationAction struct {
+	// Data Opaque, signed by Muster like a button's data; return it unchanged with `notification_acknowledged`.
+	Data string `json:"data"`
+
+	// Label How the person acknowledges, in their language, such as "Press 1 to acknowledge"; the bridge may say it in its own words.
+	Label string `json:"label"`
+}
+
+// NotificationInput defines model for NotificationInput.
+type NotificationInput struct {
+	// Action How the person acknowledges the notification. Absent when there is nothing to acknowledge, as for a confirmation code.
+	Action *NotificationAction `json:"action,omitempty"`
+
+	// Contact Where the bridge reaches the person, as they entered it in Muster and the bridge understands it, such as a phone number.
+	Contact string `json:"contact"`
+
+	// Language The language of the person, which the text is in.
+	Language NotificationInputLanguage `json:"language"`
+
+	// Text Plain text, which the bridge reads out or sends as it can.
+	Text string `json:"text"`
+}
+
+// NotificationInputLanguage The language of the person, which the text is in.
+type NotificationInputLanguage string
+
+// NotificationSent defines model for NotificationSent.
+type NotificationSent struct {
+	// NotificationId Names the notification in its `notification_acknowledged`; opaque to Muster.
+	NotificationId string `json:"notification_id"`
+	Replayed       bool   `json:"replayed"`
+}
+
 // Person defines model for Person.
 type Person struct {
 	DisplayName string `json:"display_name"`
@@ -895,6 +990,12 @@ type ReplyInThreadParams struct {
 	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
 }
 
+// SendNotificationParams defines parameters for SendNotification.
+type SendNotificationParams struct {
+	// IdempotencyKey Identifies the request across retries; a repeated key with the same token returns the first result without creating anything again. Keys are scoped per token.
+	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
+}
+
 // FindUsersParams defines parameters for FindUsers.
 type FindUsersParams struct {
 	// Handle The handle as the person entered it, in the kind `user_lookup` declares.
@@ -927,6 +1028,9 @@ type EditMessageJSONRequestBody = MessageContent
 
 // ReplyInThreadJSONRequestBody defines body for ReplyInThread for application/json ContentType.
 type ReplyInThreadJSONRequestBody = ThreadReplyInput
+
+// SendNotificationJSONRequestBody defines body for SendNotification for application/json ContentType.
+type SendNotificationJSONRequestBody = NotificationInput
 
 // BridgeEventJSONRequestBody defines body for BridgeEvent for application/json ContentType.
 type BridgeEventJSONRequestBody = Event
@@ -1067,6 +1171,40 @@ func (t *Event) MergeMessageDeletedEvent(v MessageDeletedEvent) error {
 	return err
 }
 
+// AsNotificationAcknowledgedEvent returns the union data inside the Event as a NotificationAcknowledgedEvent
+func (t Event) AsNotificationAcknowledgedEvent() (NotificationAcknowledgedEvent, error) {
+	var body NotificationAcknowledgedEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromNotificationAcknowledgedEvent overwrites any union data inside the Event as the provided NotificationAcknowledgedEvent
+func (t *Event) FromNotificationAcknowledgedEvent(v NotificationAcknowledgedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	b, err = runtime.JSONMerge(b, []byte(`{"type":"notification_acknowledged"}`))
+	t.union = b
+	return err
+}
+
+// MergeNotificationAcknowledgedEvent performs a merge with any union data inside the Event, using the provided NotificationAcknowledgedEvent
+func (t *Event) MergeNotificationAcknowledgedEvent(v NotificationAcknowledgedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	b, err = runtime.JSONMerge(b, []byte(`{"type":"notification_acknowledged"}`))
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 func (t Event) Discriminator() (string, error) {
 	var discriminator struct {
 		Discriminator string `json:"type"`
@@ -1085,6 +1223,8 @@ func (t Event) ValueByDiscriminator() (interface{}, error) {
 		return t.AsAccountLinkEvent()
 	case "message_deleted":
 		return t.AsMessageDeletedEvent()
+	case "notification_acknowledged":
+		return t.AsNotificationAcknowledgedEvent()
 	case "press":
 		return t.AsPressEvent()
 	case "thread_message":
