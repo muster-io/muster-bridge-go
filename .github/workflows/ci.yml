@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.x'
+          go-version: '1.27.3'
       # bin/tools keeps the tools the Makefile builds; the key changes with the Go toolchain and the tool versions.
       - name: compute the key of the Go tools
         id: tools
@@ -77,7 +77,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.x'
+          go-version: '1.27.3'
       - name: compute the key of the Go tools
         id: tools
         run: |
@@ -110,7 +110,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.x'
+          go-version: '1.27.3'
       - name: compute the key of the Go tools
         id: tools
         run: |
@@ -132,7 +132,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.x'
+          go-version: '1.27.3'
       - name: compute the key of the Go tools
         id: tools
         run: |
@@ -167,7 +167,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.x'
+          go-version: '1.27.3'
       - run: make conformance
 
   # The required check: it passes only when every job above succeeded, and fails when one failed, was cancelled or
