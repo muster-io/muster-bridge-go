@@ -418,3 +418,99 @@ func Example_layout() {
 	// Acknowledged by @U1
 	// Open in Muster: https://muster.example.org/alert-groups/42
 }
+
+// pager is a gateway that keeps the notifications it was asked to send: a whole Gateway in a few lines.
+type pager struct {
+	mu   sync.Mutex
+	sent []bridge.NotificationInput
+	said string
+}
+
+func (p *pager) SendNotification(_ context.Context, _ string, in bridge.NotificationInput) (bridge.NotificationSent,
+	error,
+) {
+	if !strings.HasPrefix(in.Contact, "+") {
+		return bridge.NotificationSent{}, bridge.InvalidError("The contact is not a phone number.")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sent = append(p.sent, in)
+	return bridge.NotificationSent{NotificationId: "call-" + strconv.Itoa(len(p.sent))}, nil
+}
+
+func (p *pager) Answer(_ context.Context, _ string, ev bridge.ReportedEvent, _ string) (bridge.AnswerShownShownAs,
+	error,
+) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.said = "said to the person who acknowledged " + ev.NotificationID + " with " + ev.Data
+	return bridge.AnswerShownShownAsNotification, nil
+}
+
+// A bridge whose only role is gateway has a Gateway and no Messenger. When the person acknowledges the call, the
+// bridge reports it with Acknowledge, and Muster answers the event with Gateway.Answer.
+func Example_gateway() {
+	gw := &pager{}
+	b, err := bridge.New(bridge.Config{
+		Name:          "pager-bridge",
+		Version:       "1.0.0",
+		MessengerName: "Pager",
+		Roles:         []bridge.Role{bridge.RoleGateway},
+		Gateway:       gw,
+		Bots:          []bridge.Bot{{Name: "main", Token: "example-token"}},
+		Limits:        bridge.Limits{MaxBodyLength: 1000},
+		Logger:        slog.New(slog.DiscardHandler),
+	}, nil)
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = b.Close(context.Background()) }()
+
+	// What Muster sends to call a person.
+	body := `{"contact":"+10000000001","text":"Alert 12 is firing","language":"en",` +
+		`"action":{"data":"ack-1","label":"Press 1 to acknowledge"}}`
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/notifications",
+		strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer example-token")
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Idempotency-Key", "k1")
+	w := httptest.NewRecorder()
+	b.Handler().ServeHTTP(w, r)
+	var sent bridge.NotificationSent
+	if err := json.Unmarshal(w.Body.Bytes(), &sent); err != nil {
+		panic(err)
+	}
+	fmt.Println(w.Code, sent.NotificationId)
+
+	// The person presses 1 on the call.
+	if err := b.Acknowledge(context.Background(), "main", sent.NotificationId); err != nil {
+		panic(err)
+	}
+	fmt.Println(pollTypes(b))
+
+	// Muster answers the event, so that the person hears it on the line.
+	res := get(b.Handler(), "/v1/events?wait=0", "example-token")
+	defer res.Body.Close()
+	var batch struct {
+		Events []struct {
+			ID string `json:"id"`
+		} `json:"events"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&batch); err != nil {
+		panic(err)
+	}
+	answer := fmt.Sprintf(`{"event_id":%q,"text":"Acknowledged."}`, batch.Events[0].ID)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/answers", strings.NewReader(answer))
+	r.Header.Set("Authorization", "Bearer example-token")
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Idempotency-Key", "k2")
+	w = httptest.NewRecorder()
+	b.Handler().ServeHTTP(w, r)
+	fmt.Println(w.Code, w.Body.String())
+	fmt.Println(gw.said)
+	// Output:
+	// 201 call-1
+	// [notification_acknowledged]
+	// 200 {"replayed":false,"shown_as":"notification"}
+	// said to the person who acknowledged call-1 with ack-1
+}

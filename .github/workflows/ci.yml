@@ -156,7 +156,7 @@ jobs:
       - run: make image
 
   # muster bridge check from Muster's newest development image against examples/minimal and examples/chat, three
-  # times each.
+  # times each, and examples/gateway, twice.
   conformance:
     name: conformance
     runs-on: ubuntu-latest

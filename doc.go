@@ -59,9 +59,37 @@
 // buttons, more buttons than MaxPerMessage and button data longer than DataMaxBytes. It checks every answer of the
 // Messenger against the specification too; one that does not match is logged and answered as transient.
 //
+// # Roles
+//
+// A bridge is a messenger, a gateway, or both: [Config.Roles] lists [RoleMessenger] and [RoleGateway], and nil is the
+// messenger alone, which info leaves out. A gateway reaches a person outside a messenger, by phone call or SMS for
+// example. The role messenger needs the [Messenger] given to [New]; the role gateway needs [Config.Gateway], and a
+// bridge whose only role is gateway passes a nil Messenger; [New] refuses either role without its implementation, a
+// Gateway or a Messenger without its role, and names the reason. A bridge without the role messenger answers 404 to
+// the operations of the messenger and its reports ([Bridge.Press] and the others) are [ErrNotOffered].
+//
+//   - sendNotification calls [Gateway.SendNotification] with the contact, the text, the language and the optional
+//     action of the notification. It carries an Idempotency-Key like postMessage: a repeated key answers the first
+//     notification_id with replayed true without calling the Gateway. A text over 1,000 code points, action data over
+//     64 bytes and a call on a bridge without the role are 400 invalid before the Gateway is called. The library keeps
+//     the action's data of each notification, per bot, for 24 hours in the [Store], as an entry of its own: a key
+//     of 78 characters that starts with a space, so that it is never an Idempotency-Key, which a Store keeps as it is.
+//     The notification_id must be unique per bot. When the Store fails to keep the entry, the call still succeeds, the
+//     failure is logged, and the notification can no longer be acknowledged.
+//   - [Bridge.Acknowledge] reports that the person acknowledged a notification: it queues notification_acknowledged
+//     with that data, for polling and push like any other event. A notification the bridge did not send to the bot, or
+//     one sent without an action, is refused ([ErrUnknownNotification], [ErrNoAction]).
+//   - answerEvent for that event calls [Gateway.Answer] with a [ReportedEvent] that has the NotificationID and the
+//     Data. During a phone call Muster answers a pushed event before it answers the push, so a gateway that wants to
+//     say the answer to the person still on the line uses the push mode and reads the answer inside Answer, while the
+//     push request is open; give the bot a [PushTarget] for it.
+//
+// examples/gateway in the repository is a complete gateway bridge in one file that prints each notification and
+// acknowledges it from a page.
+//
 // # Idempotency
 //
-// postMessage, replyInThread, sendDirectMessage and answerEvent carry an Idempotency-Key. The first successful answer
+// postMessage, replyInThread, sendDirectMessage, sendNotification and answerEvent carry an Idempotency-Key. The first successful answer
 // of a key is kept for 24 hours per bot and answered again, with replayed true, without calling the Messenger,
 // whatever the repeated body. A request whose key is still running is transient; a failed request keeps nothing, so
 // its retry runs again. A request holds its key for two minutes; a Messenger method should return when its ctx ends.

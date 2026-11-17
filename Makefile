@@ -40,6 +40,7 @@ EXAMPLE_LISTEN := 127.0.0.1:18095
 PUSH_LISTEN := 127.0.0.1:18096
 CONFORMANCE_DIR := $(BIN)/conformance
 CHECK_FLAGS := --token-file /token --channel alerts --forbidden-channel nobot --handle alice
+GATEWAY_FLAGS := --token-file /token --contact +10000000001
 STEPS := info channel_check post replayed_key buttons edit thread_reply thread_ref forbidden_channel user_lookup \
 	direct_message delete poll press push answer notification notification_acknowledged
 GATEWAY_SKIP := notification notification_acknowledged
@@ -47,6 +48,11 @@ RUN1_SKIP := press push $(GATEWAY_SKIP)
 RUN2_SKIP := buttons user_lookup direct_message delete press push $(GATEWAY_SKIP)
 RUN1_PASS := $(filter-out $(RUN1_SKIP),$(STEPS))
 RUN2_PASS := $(filter-out $(RUN2_SKIP),$(STEPS))
+# A bridge whose only role is gateway passes these and skips the steps of the role messenger.
+GATEWAY_PASS := info poll answer notification
+GATEWAY_SKIP_RUN := $(filter-out $(GATEWAY_PASS),$(STEPS))
+GATEWAY_PASS_INTERACTIVE := $(GATEWAY_PASS) notification_acknowledged
+GATEWAY_SKIP_INTERACTIVE := $(filter-out $(GATEWAY_PASS_INTERACTIVE),$(STEPS))
 
 .PHONY: help fmt lint test generate generate-check spec-check spec-sync licenses vulncheck build ci image conformance \
 	clean
@@ -127,10 +133,11 @@ licenses: $(GO_LICENSES) ## Fail on a linked dependency whose licence is not in 
 vulncheck: $(GOVULNCHECK) ## Find vulnerable Go code that is called (govulncheck)
 	$(GOVULNCHECK) ./...
 
-build: ## Build the package, and the examples into bin/minimal and bin/chat
+build: ## Build the package, and the examples into bin/minimal, bin/chat and bin/gateway
 	$(GO) build ./...
 	$(GO) build -o $(BIN)/minimal ./examples/minimal
 	$(GO) build -o $(BIN)/chat ./examples/chat
+	$(GO) build -o $(BIN)/gateway ./examples/gateway
 
 ci: lint generate-check spec-check licenses test build ## The checks of a pull request, locally (vulncheck, image and conformance run in their own CI jobs)
 
@@ -138,7 +145,7 @@ image: ## Build the example bridge's image as IMAGE for this machine's platform 
 	$(DOCKER) build -f examples/chat/Dockerfile -t $(IMAGE) .
 	$(DOCKER) run --rm $(IMAGE) -help
 
-conformance: ## Run muster bridge check from MUSTER_IMAGE against both examples, three times each (Linux, Docker)
+conformance: ## Run muster bridge check from MUSTER_IMAGE against the three examples (Linux, Docker)
 	@sh -c "$$CONFORMANCE_SH"
 
 clean: ## Remove bin/: the examples, the coverage profiles and the installed tools
@@ -193,7 +200,8 @@ endef
 export HEADER_CHECK_SH
 
 # The conformance check: examples/minimal and examples/chat against muster bridge check of MUSTER_IMAGE, three runs
-# each, every run with the steps it must pass and skip. Docker's host network makes it Linux only.
+# each, and examples/gateway, two runs, every run with the steps it must pass and skip. Docker's host network makes it
+# Linux only.
 define CONFORMANCE_SH
 unset BRIDGE_TOKEN BRIDGE_PUSH_URL BRIDGE_PUSH_SECRET BRIDGE_FEATURES
 dir=$(abspath $(CONFORMANCE_DIR))
@@ -210,8 +218,10 @@ trap 'exit 130' INT TERM
 
 minimal=$(abspath $(BIN))/minimal
 chat=$(abspath $(BIN))/chat
+gateway=$(abspath $(BIN))/gateway
 $(GO) build -o "$$minimal" ./examples/minimal || exit 1
 $(GO) build -o "$$chat" ./examples/chat || exit 1
+$(GO) build -o "$$gateway" ./examples/gateway || exit 1
 $(DOCKER) pull --quiet $(MUSTER_IMAGE) || exit 1
 echo "muster image: $$($(DOCKER) image inspect --format '{{index .RepoDigests 0}}' $(MUSTER_IMAGE))"
 $(DOCKER) run --rm $(MUSTER_IMAGE) version || exit 1
@@ -267,51 +277,52 @@ verify() {
 	fi
 }
 
-# unattended <name> <pass> <skip>: run the check with --no-interactive and verify its lines.
+# unattended <name> <pass> <skip> <flags>: run the check with --no-interactive and verify its lines.
 unattended() {
 	$(DOCKER) run --rm --network host -v "$$dir/token:/token:ro" $(MUSTER_IMAGE) bridge check \
-		http://$(EXAMPLE_LISTEN) $(CHECK_FLAGS) --no-interactive > "$$dir/$$1.out" 2> "$$dir/$$1.err"
+		http://$(EXAMPLE_LISTEN) $$4 --no-interactive > "$$dir/$$1.out" 2> "$$dir/$$1.err"
 	status=$$?
 	cat "$$dir/$$1.out"
 	verify "$$1" "$$status" "$$2" "$$3"
 }
 
-# interactive <name> <press URL> <press body>: run the check with a person and its push listener; the person presses
-# the message that the WAIT press line names, as alice, by posting the body, a printf format whose %s is the message
-# id, to the press URL. Every step must pass.
+# interactive <name> <step> <id name> <URL> <body> <pass> <skip> <flags>: run the check with a person and its push
+# listener; the person does what the WAIT line of the step names, for the message_id or notification_id that it
+# prints (the id name), by posting the body, a printf format whose %s is that id, to the URL: presses the message as
+# alice, or acknowledges the notification. Every step but those of the skip list must pass.
 interactive() {
 	$(DOCKER) run --rm --network host -v "$$dir/token:/token:ro" -v "$$dir/push-secret:/push-secret:ro" \
-		$(MUSTER_IMAGE) bridge check http://$(EXAMPLE_LISTEN) $(CHECK_FLAGS) \
+		$(MUSTER_IMAGE) bridge check http://$(EXAMPLE_LISTEN) $$8 \
 		--push-listen $(PUSH_LISTEN) --push-secret-file /push-secret > "$$dir/$$1.out" 2> "$$dir/$$1.err" &
 	check=$$!
 	id=
 	n=0
 	while [ "$$n" -lt 1200 ]; do
-		id=$$(sed -n 's/^WAIT press: .*, message_id \(.*\)$$/\1/p' "$$dir/$$1.out")
+		id=$$(sed -n "s/^WAIT $$2: .*, $$3 \\(.*\\)$$/\\1/p" "$$dir/$$1.out")
 		if [ -n "$$id" ] || ! kill -0 "$$check" 2>/dev/null; then break; fi
 		n=$$((n + 1))
 		sleep 0.1
 	done
 	if [ -n "$$id" ]; then
-		code=$$($(CURL) -sS -X POST -H 'Content-Type: application/json' -d "$$(printf "$$3" "$$id")" \
-			-o "$$dir/$$1.press" -w '%{http_code}' "$$2")
+		code=$$($(CURL) -sS -X POST -H 'Content-Type: application/json' -d "$$(printf "$$5" "$$id")" \
+			-o "$$dir/$$1.action" -w '%{http_code}' "$$4")
 		case $$code in
 		2??) ;;
-		*) echo "conformance $$1: the press answered $$code: $$(cat "$$dir/$$1.press" 2>/dev/null)" ;;
+		*) echo "conformance $$1: $$4 answered $$code: $$(cat "$$dir/$$1.action" 2>/dev/null)" ;;
 		esac
 	else
-		echo "conformance $$1: no WAIT press line"
+		echo "conformance $$1: no WAIT $$2 line"
 	fi
 	wait "$$check"
 	status=$$?
 	check=
 	cat "$$dir/$$1.out"
-	verify "$$1" "$$status" "$(filter-out $(GATEWAY_SKIP),$(STEPS))" "$(GATEWAY_SKIP)"
+	verify "$$1" "$$status" "$$6" "$$7"
 }
 
 echo "== minimal 1: every feature, --no-interactive"
 if start minimal-all "$$minimal"; then
-	unattended minimal-all "$(RUN1_PASS)" "$(RUN1_SKIP)"
+	unattended minimal-all "$(RUN1_PASS)" "$(RUN1_SKIP)" "$(CHECK_FLAGS)"
 else
 	failed=1
 fi
@@ -319,7 +330,7 @@ stop
 
 echo "== minimal 2: BRIDGE_FEATURES=thread_messages, --no-interactive"
 if start minimal-thread-messages env BRIDGE_FEATURES=thread_messages "$$minimal"; then
-	unattended minimal-thread-messages "$(RUN2_PASS)" "$(RUN2_SKIP)"
+	unattended minimal-thread-messages "$(RUN2_PASS)" "$(RUN2_SKIP)" "$(CHECK_FLAGS)"
 else
 	failed=1
 fi
@@ -327,7 +338,8 @@ stop
 
 echo "== minimal 3: every feature, interactive, the example pushing to the check's listener"
 if start minimal-interactive "$$minimal" -push-url http://$(PUSH_LISTEN)/ -push-secret-file "$$dir/push-secret"; then
-	interactive minimal-interactive http://$(EXAMPLE_LISTEN)/demo/press '{"message_id":"%s","user":"alice"}'
+	interactive minimal-interactive press message_id http://$(EXAMPLE_LISTEN)/demo/press \
+		'{"message_id":"%s","user":"alice"}' "$(filter-out $(GATEWAY_SKIP),$(STEPS))" "$(GATEWAY_SKIP)" "$(CHECK_FLAGS)"
 else
 	failed=1
 fi
@@ -335,7 +347,7 @@ stop
 
 echo "== chat 1: every feature, --no-interactive"
 if start chat-all "$$chat"; then
-	unattended chat-all "$(RUN1_PASS)" "$(RUN1_SKIP)"
+	unattended chat-all "$(RUN1_PASS)" "$(RUN1_SKIP)" "$(CHECK_FLAGS)"
 else
 	failed=1
 fi
@@ -343,7 +355,7 @@ stop
 
 echo "== chat 2: BRIDGE_FEATURES=thread_messages, --no-interactive"
 if start chat-thread-messages env BRIDGE_FEATURES=thread_messages "$$chat"; then
-	unattended chat-thread-messages "$(RUN2_PASS)" "$(RUN2_SKIP)"
+	unattended chat-thread-messages "$(RUN2_PASS)" "$(RUN2_SKIP)" "$(CHECK_FLAGS)"
 else
 	failed=1
 fi
@@ -352,8 +364,27 @@ stop
 echo "== chat 3: every feature, interactive, the example pushing to the check's listener"
 if start chat-interactive env BRIDGE_PUSH_URL=http://$(PUSH_LISTEN)/ "$$chat" \
 	-push-secret-file "$$dir/push-secret"; then
-	interactive chat-interactive http://$(EXAMPLE_LISTEN)/chat/api/press \
-		'{"message_id":"%s","user":"alice","button":0}'
+	interactive chat-interactive press message_id http://$(EXAMPLE_LISTEN)/chat/api/press \
+		'{"message_id":"%s","user":"alice","button":0}' "$(filter-out $(GATEWAY_SKIP),$(STEPS))" "$(GATEWAY_SKIP)" \
+		"$(CHECK_FLAGS)"
+else
+	failed=1
+fi
+stop
+
+echo "== gateway 1: the role gateway, --no-interactive"
+if start gateway-all "$$gateway"; then
+	unattended gateway-all "$(GATEWAY_PASS)" "$(GATEWAY_SKIP_RUN)" "$(GATEWAY_FLAGS)"
+else
+	failed=1
+fi
+stop
+
+echo "== gateway 2: the role gateway, interactive, the example pushing to the check's listener"
+if start gateway-interactive "$$gateway" -push-url http://$(PUSH_LISTEN)/ -push-secret-file "$$dir/push-secret"; then
+	interactive gateway-interactive notification_acknowledged notification_id \
+		http://$(EXAMPLE_LISTEN)/demo/acknowledge '{"notification_id":"%s"}' "$(GATEWAY_PASS_INTERACTIVE)" \
+		"$(GATEWAY_SKIP_INTERACTIVE)" "$(GATEWAY_FLAGS)"
 else
 	failed=1
 fi

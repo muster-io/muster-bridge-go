@@ -43,6 +43,7 @@ const (
 	opSendDirectMessage = "sendDirectMessage"
 	opAnswerEvent       = "answerEvent"
 	opPollEvents        = "pollEvents"
+	opSendNotification  = "sendNotification"
 )
 
 const (
@@ -73,26 +74,37 @@ type operation struct {
 var operations = []*operation{
 	{id: opGetInfo, method: http.MethodGet, path: "/v1/info", status: http.StatusOK, serve: (*Bridge).getInfo},
 	{id: opPostMessage, method: http.MethodPost, path: "/v1/messages", status: http.StatusCreated,
-		asReplay: replayOf(func(a *MessagePosted) { a.Replayed = true }), run: (*call).postMessage},
+		asReplay: replayOf(func(a *MessagePosted) { a.Replayed = true }), served: messengerOnly(nil),
+		run: (*call).postMessage},
 	{id: opEditMessage, method: http.MethodPatch, path: "/v1/messages/{message_id}", status: http.StatusOK,
-		run: (*call).editMessage},
+		served: messengerOnly(nil), run: (*call).editMessage},
 	{id: opDeleteMessage, method: http.MethodDelete, path: "/v1/messages/{message_id}", status: http.StatusNoContent,
-		served: func(b *Bridge) bool { return b.info.Capabilities.Delete != nil }, run: (*call).deleteMessage},
+		served: messengerOnly(func(b *Bridge) bool { return b.info.Capabilities.Delete != nil }),
+		run:    (*call).deleteMessage},
 	{id: opReplyInThread, method: http.MethodPost, path: "/v1/messages/{message_id}/thread-replies",
 		status: http.StatusCreated, asReplay: replayOf(func(a *ThreadReplyPosted) { a.Replayed = true }),
-		run: (*call).replyInThread},
+		served: messengerOnly(nil), run: (*call).replyInThread},
 	{id: opCheckChannel, method: http.MethodPost, path: "/v1/channels/{channel_id}/check", status: http.StatusOK,
-		run: (*call).checkChannel},
+		served: messengerOnly(nil), run: (*call).checkChannel},
 	{id: opFindUsers, method: http.MethodGet, path: "/v1/users", status: http.StatusOK,
-		served: func(b *Bridge) bool { return b.info.UserLookup != InfoUserLookupNone }, run: (*call).findUsers},
+		served: messengerOnly(func(b *Bridge) bool { return b.info.UserLookup != InfoUserLookupNone }),
+		run:    (*call).findUsers},
 	{id: opSendDirectMessage, method: http.MethodPost, path: "/v1/direct-messages", status: http.StatusCreated,
 		asReplay: replayOf(func(a *DirectMessageSent) { a.Replayed = true }),
-		served:   func(b *Bridge) bool { return b.info.Capabilities.DirectMessages != nil },
+		served:   messengerOnly(func(b *Bridge) bool { return b.info.Capabilities.DirectMessages != nil }),
 		run:      (*call).sendDirectMessage},
+	{id: opSendNotification, method: http.MethodPost, path: "/v1/notifications", status: http.StatusCreated,
+		asReplay: replayOf(func(a *NotificationSent) { a.Replayed = true }), run: (*call).sendNotification},
 	{id: opAnswerEvent, method: http.MethodPost, path: "/v1/answers", status: http.StatusOK,
 		asReplay: replayOf(func(a *AnswerShown) { a.Replayed = true }), run: (*call).answerEvent},
 	{id: opPollEvents, method: http.MethodGet, path: "/v1/events", status: http.StatusOK,
 		served: func(b *Bridge) bool { return b.pollOffered }, serve: (*Bridge).pollEvents},
+}
+
+// messengerOnly is the condition of an operation that only a bridge with the role messenger serves, and that also
+// needs extra, when it is not nil.
+func messengerOnly(extra func(*Bridge) bool) func(*Bridge) bool {
+	return func(b *Bridge) bool { return b.hasRole(RoleMessenger) && (extra == nil || extra(b)) }
 }
 
 // replayOf makes the asReplay of an operation whose answer type is A: decode the stored first answer into an A, let

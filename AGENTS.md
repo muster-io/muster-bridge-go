@@ -38,6 +38,8 @@ In this order; an earlier source wins over a later one.
 | `models.gen.go` | generated from `api/bridge.yaml` by `make generate`; never edited by hand |
 | `*_test.go` | the tests; `spec_test.go` validates every request and answer against the specification, `example_test.go` holds the runnable examples |
 | `examples/minimal/` | the minimal example, one file, which the README's quick start shows and `make conformance` checks |
+| `gateway.go` | the role gateway: `Role`, `Gateway`, `sendNotification`, `Bridge.Acknowledge` |
+| `examples/gateway/` | the gateway example, one file; `make conformance` checks it with `--contact` |
 | `examples/chat/` | the example bridge: a chat with its web page (`web/`), its README and Dockerfile; `make conformance` checks it and `image.yml` publishes its image |
 | `api/` | the specification's copy and the oapi-codegen configuration |
 | `.github/` | the workflows, Renovate and the pull request template |
@@ -47,7 +49,7 @@ In this order; an earlier source wins over a later one.
 The Makefile is the only entry point; `make help` lists the targets. `make ci` runs what a pull request runs, except
 `vulncheck`, `image` and `conformance`, which CI runs as jobs of their own. `make conformance` runs `muster bridge
 check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against `examples/minimal` and `examples/chat`, three
-times each, and needs Docker on Linux, because the check reaches the examples through the host's network. The tools are
+times each, and `examples/gateway`, twice, and needs Docker on Linux, because the check reaches the examples through the host's network. The tools are
 pinned in the Makefile under `# renovate:` comments and built into `bin/tools/`.
 
 ## Rules
