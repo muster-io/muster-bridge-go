@@ -1031,3 +1031,60 @@ func TestValidLayoutSurvivesStrayLayoutKey(t *testing.T) {
 		t.Fatalf("layout = %+v, want %+v", got, want)
 	}
 }
+
+// A body whose group or everyone entry arrives at a bridge that declared neither is never refused for its kind.
+func TestAcceptsEveryMentionKindWhateverIsDeclared(t *testing.T) {
+	mentions := `"mentions":[` +
+		`{"ref":"u1","external_id":"u-alice","display_name":"Alice Smith"},` +
+		`{"ref":"u2","external_id":"u-bob","display_name":"Bob","kind":"user"},` +
+		`{"ref":"g1","external_id":"payments_team","display_name":"payments_team","kind":"group"},` +
+		`{"ref":"e1","external_id":"here","display_name":"here","kind":"everyone"}]`
+	body := strings.Replace(withBody(postBody, `[@Alice Smith](muster-mention:u1) [@payments\_team](muster-mention:g1) `+
+		`[@here](muster-mention:e1)`), `"mentions":[]`, mentions, 1)
+	reply := strings.Replace(withBody(replyBody, `[@payments\_team](muster-mention:g1)`), `"mentions":[]`, mentions, 1)
+	for _, declared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("declared %v", declared), func(t *testing.T) {
+			b, m, _, _ := newTestBridge(t, func(c *Config) {
+				c.GroupMentions = declared
+				if declared {
+					c.EveryoneMentions = []string{"here"}
+				}
+			})
+			if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), body); rec.Code != http.StatusCreated {
+				t.Fatalf("postMessage answered %d: %s", rec.Code, rec.Body)
+			}
+			if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages/m1/thread-replies", tokenMain, key("k2"), reply); rec.Code != http.StatusCreated {
+				t.Fatalf("replyInThread answered %d: %s", rec.Code, rec.Body)
+			}
+			calls := m.recorded()
+			if len(calls) != 2 {
+				t.Fatalf("calls = %d, want 2", len(calls))
+			}
+			in := calls[0].in.(MessageInput)
+			if len(in.Mentions) != 4 || in.Mentions[0].Kind != nil || *in.Mentions[2].Kind != MentionKindMentionKindGroup ||
+				*in.Mentions[3].Kind != MentionKindMentionKindEveryone {
+				t.Fatalf("the Messenger got %+v", in.Mentions)
+			}
+			out := b.ReplaceMentions(in.Body, in.Mentions, func(m Mention) string { return "<" + string(*m.Kind) + ">" })
+			if !strings.HasPrefix(out, `<user>`) {
+				t.Fatalf("rendered %q", out)
+			}
+			wantTail := `@payments\_team @here`
+			if declared {
+				wantTail = `<group> <everyone>`
+			}
+			if !strings.HasSuffix(out, wantTail) {
+				t.Fatalf("rendered %q, want it to end with %q", out, wantTail)
+			}
+		})
+	}
+}
+
+func TestRefusesAnUnknownMentionKind(t *testing.T) {
+	b, _, _, _ := newTestBridge(t, nil)
+	body := strings.Replace(postBody, `"mentions":[]`,
+		`"mentions":[{"ref":"x1","external_id":"a","display_name":"a","kind":"team"}]`, 1)
+	if rec := do(t, b.Handler(), http.MethodPost, "/v1/messages", tokenMain, key("k1"), body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a kind outside the specification answered %d", rec.Code)
+	}
+}

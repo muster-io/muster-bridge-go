@@ -741,3 +741,85 @@ func TestRealClock(t *testing.T) {
 	<-fired
 	stop()
 }
+
+func TestNewDeclaresGroupAndEveryoneMentions(t *testing.T) {
+	b, _, _, _ := newTestBridge(t, func(c *Config) {
+		c.GroupMentions = true
+		c.EveryoneMentions = []string{"here", "channel"}
+	})
+	info := decodeJSON(t, do(t, b.Handler(), http.MethodGet, "/v1/info", tokenMain, nil, "").Body.Bytes())
+	caps := info["capabilities"].(map[string]any)
+	if caps["group_mentions"] != true || !slices.Equal(anyStrings(caps["everyone_mentions"]), []string{"here", "channel"}) {
+		t.Fatalf("capabilities = %v", caps)
+	}
+	plain, _, _, _ := newTestBridge(t, nil)
+	caps = decodeJSON(t, do(t, plain.Handler(), http.MethodGet, "/v1/info", tokenMain, nil, "").Body.Bytes())["capabilities"].(map[string]any)
+	if _, ok := caps["group_mentions"]; ok {
+		t.Fatalf("a bridge that declares nothing shows group_mentions: %v", caps)
+	}
+	if _, ok := caps["everyone_mentions"]; ok {
+		t.Fatalf("a bridge that declares nothing shows everyone_mentions: %v", caps)
+	}
+}
+
+func anyStrings(v any) []string {
+	var out []string
+	for _, e := range v.([]any) {
+		out = append(out, e.(string))
+	}
+	return out
+}
+
+func TestNewRefusesEveryoneMentions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"unknown name", func(c *Config) { c.EveryoneMentions = []string{"here", "everybody"} },
+			`everyone_mentions[1] "everybody" is not one of channel, here, all and everyone`},
+		{"repeated", func(c *Config) { c.EveryoneMentions = []string{"here", "here"} },
+			`everyone_mentions[1] "here" is repeated`},
+		{"case matters", func(c *Config) { c.EveryoneMentions = []string{"Here"} },
+			`everyone_mentions[0] "Here" is not one of`},
+		{"capabilities", func(c *Config) {
+			c.Capabilities.EveryoneMentions = &[]CapabilitiesEveryoneMentions{"all", "all", "nobody"}
+		}, `capabilities.everyone_mentions[1] "all" is repeated`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(newFakeClock(), io.Discard)
+			tt.mutate(&cfg)
+			_, err := New(cfg, &fakeMessenger{})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("New error = %v, want it to say %q", err, tt.want)
+			}
+		})
+	}
+	cfg := testConfig(newFakeClock(), io.Discard)
+	cfg.EveryoneMentions = []string{"channel", "here", "all", "everyone"}
+	b, err := New(cfg, &fakeMessenger{})
+	if err != nil {
+		t.Fatalf("New refused the four names: %v", err)
+	}
+	_ = b.Close(context.Background())
+}
+
+func TestConfigEveryoneMentionsReplacesCapabilities(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		list []string
+		want string
+	}{{"replaces", []string{"all"}, `["all"]`}, {"empty list", []string{}, `[]`}} {
+		t.Run(tt.name, func(t *testing.T) {
+			b, _, _, _ := newTestBridge(t, func(c *Config) {
+				c.Capabilities.EveryoneMentions = &[]CapabilitiesEveryoneMentions{"here"}
+				c.EveryoneMentions = tt.list
+			})
+			got, _ := json.Marshal(decodeJSON(t, do(t, b.Handler(), http.MethodGet, "/v1/info", tokenMain, nil, "").Body.Bytes())["capabilities"].(map[string]any)["everyone_mentions"])
+			if string(got) != tt.want {
+				t.Fatalf("everyone_mentions = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}

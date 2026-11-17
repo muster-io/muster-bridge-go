@@ -191,11 +191,18 @@ func TestRequestsAndAnswersMatchSpec(t *testing.T) {
 	check, users, dm, answers, events := "/v1/channels/alerts/check", "/v1/users", "/v1/direct-messages",
 		"/v1/answers", "/v1/events"
 	long := withBody(postBody, strings.Repeat("x", 501))
+	kinds := `"mentions":[{"ref":"u1","external_id":"u-alice","display_name":"Alice"},` +
+		`{"ref":"u2","external_id":"u-bob","display_name":"Bob","kind":"user"},` +
+		`{"ref":"g1","external_id":"payments_team","display_name":"payments_team","kind":"group"},` +
+		`{"ref":"e1","external_id":"here","display_name":"here","kind":"everyone"}]`
+	withKinds := func(body string) string { return strings.Replace(body, `"mentions":[]`, kinds, 1) }
 	rows := []exchange{
 		{name: "200", op: opGetInfo, method: http.MethodGet, path: "/v1/info", status: 200},
 		{name: "401", op: opGetInfo, method: http.MethodGet, path: "/v1/info", token: "wrong", status: 401},
 
 		{name: "201", op: opPostMessage, method: http.MethodPost, path: post, body: postBody, status: 201},
+		{name: "201 mentions of every kind", op: opPostMessage, method: http.MethodPost, path: post,
+			body: withKinds(postBody), status: 201},
 		{name: "201 replayed", op: opPostMessage, method: http.MethodPost, path: post, body: postBody, status: 201,
 			setup: replay(post, postBody)},
 		{name: "400 spec", op: opPostMessage, method: http.MethodPost, path: post, body: "{}", status: 400,
@@ -246,6 +253,8 @@ func TestRequestsAndAnswersMatchSpec(t *testing.T) {
 		{name: "201", op: opReplyInThread, method: http.MethodPost, path: reply, body: replyBody, status: 201},
 		{name: "400", op: opReplyInThread, method: http.MethodPost, path: reply, body: "{}", status: 400,
 			invalid: true},
+		{name: "201 mentions of every kind", op: opReplyInThread, method: http.MethodPost, path: reply,
+			body: withKinds(replyBody), status: 201},
 		{name: "401", op: opReplyInThread, method: http.MethodPost, path: reply, body: replyBody, token: "wrong",
 			status: 401},
 		{name: "403", op: opReplyInThread, method: http.MethodPost, path: reply, body: replyBody, err: forbidden,
@@ -364,6 +373,8 @@ func TestInfoMatchesSpec(t *testing.T) {
 		c.Capabilities.PrivateAnswers = &[]CapabilitiesPrivateAnswers{CapabilitiesPrivateAnswersEphemeral,
 			CapabilitiesPrivateAnswersPopup}
 		c.Capabilities.Delete.MaxAgeSeconds = new(86400)
+		c.GroupMentions = true
+		c.EveryoneMentions = []string{"channel", "here", "all", "everyone"}
 	})
 	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/info", nil)
 	r.Header.Set("Authorization", "Bearer "+tokenMain)

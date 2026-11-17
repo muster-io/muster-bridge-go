@@ -128,7 +128,14 @@ never reuses an id that Muster still holds.
    accept (a status key of a later Muster, a missing `ref`): the library drops it, logs a warning with where and why
    and passes nil, while an error anywhere else still answers `invalid`. `Example_layout` in
    [`example_test.go`](example_test.go) renders one.
-6. Turn Mention markers into native mentions or plain names with `bridge.ReplaceMentions`.
+6. Turn Mention markers into native mentions or plain names with `bridge.ReplaceMentions`. Each entry of `mentions`
+   has a `Kind`: `user` (also an entry without `kind`), `group` (the group's name in `ExternalId` and `DisplayName`) or
+   `everyone` (the symbolic name `channel`, `here`, `all` or `everyone`). To receive groups and everyone, set
+   `Config.GroupMentions` and `Config.EveryoneMentions` (a list of those four names, each once; `bridge.New` refuses any
+   other); Muster sends only what `info` declares, and a Team mention or group entry of a Destination needs
+   `GroupMentions`. `b.ReplaceMentions` shows an entry of a kind the bridge did not declare as the marker's link text,
+   and the library never refuses an entry for its kind, since Muster's copy of `info` may be older. `Example_groupMentions`
+   in [`example_test.go`](example_test.go) renders a user, a group and `here`.
 7. For pushes, give a bot a `PushTarget` — the callback URL and the push secret that its Bridge Connection in Muster
    shows — in `Config.Bots` or later with `b.SetPush`; `b.Close` stops the pushers.
 8. `bridge.NewMemoryStore`, the default `Store`, forgets Idempotency-Keys and queued events on a restart, and holds a
