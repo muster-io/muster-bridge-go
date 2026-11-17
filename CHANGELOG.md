@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/muster-io/muster-bridge-go/compare/v0.1.1...v0.1.2) (2026-11-17)
+
+
+### Features
+
+* declare group mentions and mentions of everyone, and pass the kind of a mention ([#24](https://github.com/muster-io/muster-bridge-go/issues/24)) ([928d446](https://github.com/muster-io/muster-bridge-go/commit/928d446bdcb0f9f5c9f8ab13bba3dba6f487e56d))
+* support the gateway role with sendNotification and notification_acknowledged ([#26](https://github.com/muster-io/muster-bridge-go/issues/26)) ([17c7c36](https://github.com/muster-io/muster-bridge-go/commit/17c7c36170bb7e3871bb9a7de06aae54bd1242d7))
+
 ## [0.1.1](https://github.com/muster-io/muster-bridge-go/compare/v0.1.0...v0.1.1) (2026-11-06)
 
 
