@@ -67,7 +67,14 @@ type Config struct {
 	// Name and Version are the bridge's, as info shows them: 1 to 100 characters each.
 	Name    string
 	Version string
-	// MessengerName is the messenger's name as people know it: 1 to 100 characters.
+	// Roles are what the bridge is, from RoleMessenger and RoleGateway, each once; nil is RoleMessenger alone, which
+	// info leaves out, as a bridge written before roles is a messenger. A bridge with the role messenger needs a
+	// Messenger, and one with the role gateway needs the Gateway below.
+	Roles []Role
+	// Gateway implements the role gateway: set exactly when Roles has RoleGateway.
+	Gateway Gateway
+	// MessengerName is the messenger's name as people know it, or, for a bridge that is only a gateway, the name of
+	// its provider: 1 to 100 characters.
 	MessengerName string
 	// Bots are the bots the bridge serves, at least one; each is a Bridge Connection in Muster.
 	Bots []Bot
@@ -117,7 +124,9 @@ type PushTarget struct {
 
 // Bridge serves the Bridge protocol for the bots of its Config and calls the Messenger.
 type Bridge struct {
+	roles     []Role
 	messenger Messenger
+	gateway   Gateway
 	finder    UserFinder
 	dm        DirectMessenger
 	deleter   Deleter
@@ -177,7 +186,8 @@ const (
 	whsecPrefix = "whsec_"
 )
 
-// New checks cfg and returns the bridge that serves it with m. It names every problem it finds: a bot without a name
+// New checks cfg and returns the bridge that serves it with m, the Messenger of the role messenger, which is nil for
+// a bridge whose only role is gateway. It names every problem it finds: a bot without a name
 // or a token of its own, a feature whose interface m lacks, a push target that is not valid, and the info that cfg
 // makes when it does not match api/bridge.yaml. Bots with a push target start pushing at once.
 func New(cfg Config, m Messenger) (*Bridge, error) {
@@ -185,10 +195,8 @@ func New(cfg Config, m Messenger) (*Bridge, error) {
 	if err != nil {
 		return nil, err
 	}
-	var errs []error
-	if m == nil {
-		errs = append(errs, errors.New("bridge: the Messenger is nil"))
-	} else {
+	roles, errs := checkRoles(cfg, m)
+	if m != nil {
 		errs = append(errs, checkFeatures(cfg, m)...)
 	}
 	errs = append(errs, checkBots(cfg)...)
@@ -212,7 +220,9 @@ func New(cfg Config, m Messenger) (*Bridge, error) {
 	}
 
 	b := &Bridge{
+		roles:     roles,
 		messenger: m,
+		gateway:   cfg.Gateway,
 		store:     cfg.Store,
 		log:       cfg.Logger,
 		clock:     cfg.clock,
@@ -496,6 +506,10 @@ func buildInfo(cfg Config) Info {
 	}
 	if info.EventDelivery == nil {
 		info.EventDelivery = []InfoEventDelivery{InfoEventDeliveryPoll, InfoEventDeliveryPush}
+	}
+	if cfg.Roles != nil {
+		roles := slices.Clone(cfg.Roles)
+		info.Roles = &roles
 	}
 	if cfg.LinkURLTemplate != "" {
 		link := cfg.LinkURLTemplate

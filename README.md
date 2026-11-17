@@ -147,6 +147,41 @@ The package documentation, on [pkg.go.dev](https://pkg.go.dev/github.com/muster-
 [`doc.go`](doc.go), describes what the library does for every operation; [`example_test.go`](example_test.go) has
 runnable examples.
 
+## Writing a gateway
+
+A bridge can instead, or also, be a Notification gateway: it reaches a person outside a messenger, by phone call or SMS
+for example. Set `Config.Roles` to `[]bridge.Role{bridge.RoleGateway}`, pass an implementation of
+[`bridge.Gateway`](https://pkg.go.dev/github.com/muster-io/muster-bridge-go#Gateway) as `Config.Gateway`, and pass a nil
+Messenger to `bridge.New`; with both roles, give both. `bridge.New` refuses a role without its implementation, and an
+implementation without its role.
+
+1. `SendNotification` is given the contact, the text, the language and, when the person can acknowledge, an `Action`
+   with its `Label` and `Data`. Return the id of the notification; a contact the provider refuses for good is an
+   `InvalidError`, credentials it refuses a `ForbiddenError`. The library keeps the idempotency of the call (a repeated
+   `Idempotency-Key` answers the first id with `replayed` true and calls nothing) and refuses a text over 1,000 code
+   points and action data over 64 bytes before your code runs.
+2. When the person acknowledges, call `b.Acknowledge(ctx, bot, notificationID)`. It queues `notification_acknowledged`
+   with the notification's action data, for polling and push; a notification without an action, or one the bridge
+   did not send, is refused with `ErrNoAction` or `ErrUnknownNotification`. The library keeps the data for 24 hours in
+   the `Store`.
+3. `Answer` is given the event and the text that Muster answers it with. During a phone call, Muster answers a pushed
+   event before it answers the push, so the text can be said to the person still on the line: use the push mode for
+   such a bridge and say it inside `Answer`.
+
+[`examples/gateway`](examples/gateway/main.go) is a whole gateway in one file, with a provider in memory that logs each
+notification. Its page `/demo/acknowledge` lists the notifications with a button each, and `POST /demo/acknowledge`
+`{"notification_id": "…"}` acknowledges one from a script. `Example_gateway` in [`example_test.go`](example_test.go) is
+the same in a few lines. Check it with a contact:
+
+```sh
+go run ./examples/gateway -token-file /tmp/bt &
+docker run --rm --network host -v /tmp/bt:/token:ro ghcr.io/muster-io/muster:edge bridge check \
+  http://127.0.0.1:18095 --token-file /token --contact +10000000001 --no-interactive
+```
+
+Without `--no-interactive` the check prints `WAIT notification_acknowledged: …, notification_id <id>` and waits for the
+acknowledgement, which you give from the example's page; `make conformance` plays that person.
+
 ## Checking a bridge
 
 `muster bridge check <url> --token-file <file> --channel <id>` runs every step of the protocol against a bridge and
@@ -200,10 +235,10 @@ The Makefile is the only entry point; `make help` lists the targets.
 | `make spec-check`, `make spec-sync` | compares `api/bridge.yaml` with Muster's; replaces it and regenerates |
 | `make licenses` | fails on a linked dependency outside MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, Unlicense and CC0-1.0 |
 | `make vulncheck` | finds vulnerable Go code that is called (govulncheck) |
-| `make build` | builds the package, `bin/minimal` and `bin/chat` |
+| `make build` | builds the package, `bin/minimal`, `bin/chat` and `bin/gateway` |
 | `make ci` | `lint`, `generate-check`, `spec-check`, `licenses`, `test` and `build`, as a pull request runs them |
 | `make image` | builds the example bridge's image for this machine (`IMAGE`, `muster-example-bridge:dev` by default) and prints its `-help`; needs Docker |
-| `make conformance` | runs `muster bridge check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against each example three times: every feature, only `thread_messages`, and interactively with push; Linux with Docker only |
+| `make conformance` | runs `muster bridge check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against each messenger example three times: every feature, only `thread_messages`, and interactively with push, and against the gateway example twice: without and with a person acknowledging; Linux with Docker only |
 | `make clean` | removes `bin/`: the examples, the coverage profiles and the installed tools |
 
 The pinned tools (golangci-lint, go-licenses, govulncheck, oapi-codegen) are built into `bin/tools/` on first use.

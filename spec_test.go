@@ -48,17 +48,11 @@ func TestEmbeddedSpecLoadsAndValidates(t *testing.T) {
 	}
 }
 
-// gatewayOperations are the operations of the gateway role, which the library does not serve: it is a messenger library.
-var gatewayOperations = map[string]bool{"sendNotification": true}
-
 func TestEveryOperationIsServed(t *testing.T) {
 	doc := testProtocol(t).doc
 	var spec, table []string
 	for path, item := range doc.Paths.Map() {
 		for method, op := range item.Operations() {
-			if gatewayOperations[op.OperationID] {
-				continue
-			}
 			spec = append(spec, method+" "+path+" "+op.OperationID)
 		}
 	}
@@ -80,9 +74,6 @@ func TestDeclaredClassesMatchSpec(t *testing.T) {
 	statusClass := map[string]Class{"400": ClassInvalid, "403": ClassForbidden, "404": ClassGone,
 		"429": ClassRateLimited, "500": ClassTransient}
 	for id, r := range testProtocol(t).routes {
-		if gatewayOperations[id] {
-			continue
-		}
 		var classes []Class
 		for status := range r.route.Operation.Responses.Map() {
 			if c, ok := statusClass[status]; ok {
@@ -152,6 +143,8 @@ type exchange struct {
 	setup        func(t *testing.T, b *Bridge, m *fakeMessenger, s *failingStore)
 	status       int
 	invalid      bool
+	// gateway makes the bridge a messenger and a gateway, and err the error of the gateway's call.
+	gateway bool
 }
 
 func TestRequestsAndAnswersMatchSpec(t *testing.T) {
@@ -322,19 +315,52 @@ func TestRequestsAndAnswersMatchSpec(t *testing.T) {
 		{name: "500", op: opPollEvents, method: http.MethodGet, path: events + "?wait=0", status: 500,
 			setup: failingEvents},
 	}
+	notify := `{"contact":"+10000000001","text":"Alert 12 is firing","language":"en",` +
+		`"action":{"data":"ack-1","label":"Press 1 to acknowledge"}}`
+	notifications := "/v1/notifications"
+	rows = append(rows,
+		exchange{name: "201", op: opSendNotification, method: http.MethodPost, path: notifications, body: notify,
+			status: 201, gateway: true},
+		exchange{name: "201 without action", op: opSendNotification, method: http.MethodPost, path: notifications,
+			body: `{"contact":"+10000000001","text":"Code 1234","language":"ru"}`, status: 201, gateway: true},
+		exchange{name: "201 replayed", op: opSendNotification, method: http.MethodPost, path: notifications,
+			body: notify, status: 201, gateway: true, setup: replay(notifications, notify)},
+		exchange{name: "400", op: opSendNotification, method: http.MethodPost, path: notifications,
+			body: `{"contact":"","text":"x","language":"en"}`, status: 400, gateway: true, invalid: true},
+		exchange{name: "400 contact", op: opSendNotification, method: http.MethodPost, path: notifications,
+			body: notify, err: invalid, status: 400, gateway: true},
+		exchange{name: "400 no role", op: opSendNotification, method: http.MethodPost, path: notifications,
+			body: notify, status: 400},
+		exchange{name: "401", op: opSendNotification, method: http.MethodPost, path: notifications, body: notify,
+			token: "wrong", status: 401, gateway: true},
+		exchange{name: "403", op: opSendNotification, method: http.MethodPost, path: notifications, body: notify,
+			err: forbidden, status: 403, gateway: true},
+		exchange{name: "429", op: opSendNotification, method: http.MethodPost, path: notifications, body: notify,
+			err: limited, status: 429, gateway: true},
+		exchange{name: "500", op: opSendNotification, method: http.MethodPost, path: notifications, body: notify,
+			err: broken, status: 500, gateway: true},
+		exchange{name: "500 running key", op: opSendNotification, method: http.MethodPost, path: notifications,
+			body: notify, status: 500, gateway: true, setup: runningKey},
+	)
 	covered := map[string]bool{}
 	for _, row := range rows {
 		covered[row.op] = true
 		t.Run(row.op+" "+row.name, func(t *testing.T) {
 			store := newFailingStore()
-			b, m, _, _ := newTestBridge(t, func(c *Config) { c.Store = store })
+			gw := &fakeGateway{}
+			b, m, _, _ := newTestBridge(t, func(c *Config) {
+				c.Store = store
+				if row.gateway {
+					c.Roles, c.Gateway = []Role{RoleMessenger, RoleGateway}, gw
+				}
+			})
 			if row.op == opAnswerEvent {
 				reportPress(t, b, "u1")
 			}
 			if row.setup != nil {
 				row.setup(t, b, m, store)
 			}
-			m.err = row.err
+			m.err, gw.err = row.err, row.err
 			token := tokenMain
 			if row.token != "" {
 				token = row.token
@@ -345,7 +371,8 @@ func TestRequestsAndAnswersMatchSpec(t *testing.T) {
 				r.Header.Set("Content-Type", "application/json")
 			}
 			if row.op == opPostMessage || row.op == opReplyInThread || row.op == opSendDirectMessage ||
-				row.op == opAnswerEvent {
+				row.op == opAnswerEvent ||
+				row.op == opSendNotification {
 				r.Header.Set("Idempotency-Key", "k1")
 			}
 			rec := httptest.NewRecorder()
@@ -383,12 +410,27 @@ func TestInfoMatchesSpec(t *testing.T) {
 	checkExchange(t, opGetInfo, r, nil, rec, true)
 }
 
+func TestGatewayInfoMatchesSpec(t *testing.T) {
+	b, _, _, _ := newGatewayBridge(t, func(c *Config) { c.Roles = []Role{RoleGateway} })
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/info", nil)
+	r.Header.Set("Authorization", "Bearer "+tokenMain)
+	rec := httptest.NewRecorder()
+	b.Handler().ServeHTTP(rec, r)
+	checkExchange(t, opGetInfo, r, nil, rec, true)
+}
+
 func TestPushesMatchSpec(t *testing.T) {
 	clk := newFakeClock()
 	rc := newCallback(t, clk, testSecret)
-	b, _, _, _ := newTestBridge(t, func(c *Config) { c.clock = clk; c.Bots[0].Push = rc.target() })
+	b, _, _, _ := newTestBridge(t, func(c *Config) {
+		c.clock = clk
+		c.Bots[0].Push = rc.target()
+		c.Roles, c.Gateway = []Role{RoleMessenger, RoleGateway}, &fakeGateway{}
+	})
 	ctx := context.Background()
+	do(t, b.Handler(), http.MethodPost, "/v1/notifications", tokenMain, key("k1"), notifyBody)
 	for _, err := range []error{
+		b.Acknowledge(ctx, "main", "n1"),
 		b.Press(ctx, "main", Press{UpdateID: "1", MessageID: "m1", User: alice, Data: "d"}),
 		b.ThreadMessage(ctx, "main", ThreadMessage{UpdateID: "2", MessageID: "m1", User: alice, Text: "ack"}),
 		b.ThreadMessage(ctx, "main", ThreadMessage{UpdateID: "3", MessageID: "m1", ThreadRef: "t", User: alice}),
@@ -404,7 +446,7 @@ func TestPushesMatchSpec(t *testing.T) {
 	route := &routers.Route{Spec: doc, Path: "bridgeEvent", PathItem: item, Method: http.MethodPost,
 		Operation: item.Post}
 	types := map[string]bool{}
-	for range 5 {
+	for range 6 {
 		p := rc.next()
 		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/callbacks/bridge/c1", bytes.NewReader(p.body))
 		r.Header = p.header
@@ -414,7 +456,7 @@ func TestPushesMatchSpec(t *testing.T) {
 		}
 		types[decodeJSON(t, p.body)["type"].(string)] = true
 	}
-	if len(types) != 4 {
+	if len(types) != 5 {
 		t.Fatalf("pushed types %v", types)
 	}
 }

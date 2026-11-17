@@ -28,6 +28,8 @@ const (
 	EventTypeThreadMessage  EventType = "thread_message"
 	EventTypeAccountLink    EventType = "account_link"
 	EventTypeMessageDeleted EventType = "message_deleted"
+	// EventTypeNotificationAcknowledged is the event of a gateway: the person acknowledged a notification.
+	EventTypeNotificationAcknowledged EventType = "notification_acknowledged"
 )
 
 // Press is a press of a button of a message of the bot, already confirmed to the messenger.
@@ -102,6 +104,10 @@ type ReportedEvent struct {
 	User       Person
 	Chat       string
 	OccurredAt time.Time
+	// NotificationID and Data are those of an acknowledged notification, of the type
+	// EventTypeNotificationAcknowledged: the id that SendNotification answered and the notification's action data.
+	NotificationID string
+	Data           string
 }
 
 var (
@@ -127,6 +133,9 @@ func (b *Bridge) Press(ctx context.Context, bot string, p Press) error {
 	if _, ok := b.bots[bot]; !ok {
 		return ErrUnknownBot
 	}
+	if !b.hasRole(RoleMessenger) {
+		return fmt.Errorf("%w: press needs the role messenger", ErrNotOffered)
+	}
 	if b.info.Capabilities.Buttons == nil {
 		return fmt.Errorf("%w: press needs capabilities.buttons", ErrNotOffered)
 	}
@@ -144,6 +153,9 @@ func (b *Bridge) Press(ctx context.Context, bot string, p Press) error {
 func (b *Bridge) ThreadMessage(ctx context.Context, bot string, m ThreadMessage) error {
 	if _, ok := b.bots[bot]; !ok {
 		return ErrUnknownBot
+	}
+	if !b.hasRole(RoleMessenger) {
+		return fmt.Errorf("%w: thread_message needs the role messenger", ErrNotOffered)
 	}
 	if b.info.Capabilities.ThreadMessages == nil {
 		return fmt.Errorf("%w: thread_message needs capabilities.thread_messages", ErrNotOffered)
@@ -168,6 +180,9 @@ func (b *Bridge) MessageDeleted(ctx context.Context, bot string, m MessageDelete
 	if _, ok := b.bots[bot]; !ok {
 		return ErrUnknownBot
 	}
+	if !b.hasRole(RoleMessenger) {
+		return fmt.Errorf("%w: message_deleted needs the role messenger", ErrNotOffered)
+	}
 	if d := b.info.Capabilities.DeletionEvents; d == nil || !*d {
 		return fmt.Errorf("%w: message_deleted needs capabilities.deletion_events", ErrNotOffered)
 	}
@@ -187,6 +202,9 @@ func (b *Bridge) MessageDeleted(ctx context.Context, bot string, m MessageDelete
 func (b *Bridge) DirectMessage(ctx context.Context, bot string, m DirectMessage) error {
 	if _, ok := b.bots[bot]; !ok {
 		return ErrUnknownBot
+	}
+	if !b.hasRole(RoleMessenger) {
+		return fmt.Errorf("%w: account_link needs the role messenger", ErrNotOffered)
 	}
 	token, ok := accountLinkToken(m.Text)
 	if !ok {
@@ -281,6 +299,9 @@ type eventMembers struct {
 	ThreadRef  *string   `json:"thread_ref"`
 	User       Person    `json:"user"`
 	Token      string    `json:"token"`
+
+	NotificationID string `json:"notification_id"`
+	Data           string `json:"data"`
 }
 
 // pollEvents answers the events after the cursor at once, or the first that comes within wait, or none after it.
@@ -347,8 +368,17 @@ func writeBatch(w http.ResponseWriter, events []StoredEvent, next string) {
 	writeJSON(w, http.StatusOK, "application/json", mustMarshal(batch))
 }
 
-// answerEvent gives the messenger the event the answer is for; an event the library did not issue, no longer keeps,
-// or a deletion, which no person caused, is gone.
+// answers reports whether the bridge has the role that answers events of the type.
+func (b *Bridge) answers(t EventType) bool {
+	if t == EventTypeNotificationAcknowledged {
+		return b.hasRole(RoleGateway)
+	}
+	return b.hasRole(RoleMessenger)
+}
+
+// answerEvent gives the messenger, or the gateway for an acknowledged notification, the event the answer is for; an
+// event the library did not issue, no longer keeps, or a deletion, which no person caused, is gone, as is one whose
+// role the bridge does not have.
 func (c *call) answerEvent() (any, error) {
 	var in AnswerInput
 	if err := c.decode(&in); err != nil {
@@ -358,7 +388,7 @@ func (c *call) answerEvent() (any, error) {
 	if err != nil {
 		return nil, c.storeFailed(err)
 	}
-	if !ok || stored.Type == EventTypeMessageDeleted {
+	if !ok || stored.Type == EventTypeMessageDeleted || !c.b.answers(stored.Type) {
 		return nil, refuse(GoneError("The bridge does not know this event, or no longer keeps it."))
 	}
 	var m eventMembers
@@ -369,11 +399,16 @@ func (c *call) answerEvent() (any, error) {
 		c.note.secrets = append(c.note.secrets, m.Token)
 	}
 	ev := ReportedEvent{ID: stored.ID, Type: stored.Type, MessageID: m.MessageID, User: m.User, Chat: stored.Chat,
-		OccurredAt: m.OccurredAt}
+		OccurredAt: m.OccurredAt, NotificationID: m.NotificationID, Data: m.Data}
 	if m.ThreadRef != nil {
 		ev.ThreadRef = *m.ThreadRef
 	}
-	shown, err := c.b.messenger.AnswerEvent(c.ctx, c.bot, ev, in.Text)
+	var shown AnswerShownShownAs
+	if stored.Type == EventTypeNotificationAcknowledged {
+		shown, err = c.b.gateway.Answer(c.ctx, c.bot, ev, in.Text)
+	} else {
+		shown, err = c.b.messenger.AnswerEvent(c.ctx, c.bot, ev, in.Text)
+	}
 	if err != nil {
 		return nil, err
 	}

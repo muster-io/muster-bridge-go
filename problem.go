@@ -132,6 +132,7 @@ var (
 		opSendDirectMessage: {ClassInvalid, ClassForbidden, ClassRateLimited, ClassTransient},
 		opAnswerEvent:       {ClassInvalid, ClassGone, ClassRateLimited, ClassTransient},
 		opPollEvents:        {ClassInvalid, ClassRateLimited, ClassTransient},
+		opSendNotification:  {ClassInvalid, ClassForbidden, ClassRateLimited, ClassTransient},
 	}
 )
 
