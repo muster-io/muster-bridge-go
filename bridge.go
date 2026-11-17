@@ -73,6 +73,13 @@ type Config struct {
 	Bots []Bot
 	// Capabilities are the optional features; a nil member is a feature the bridge does not offer.
 	Capabilities Capabilities
+	// GroupMentions declares capabilities.group_mentions: the bridge renders the Mentions of the kind group, which the
+	// Team mentions and group entries of a Destination need. It sets Capabilities.GroupMentions; false leaves it as is.
+	GroupMentions bool
+	// EveryoneMentions declares capabilities.everyone_mentions: the symbolic names of the mentions of everyone in the
+	// chat that the messenger has, from "channel", "here", "all" and "everyone", each once. A non-nil list replaces
+	// Capabilities.EveryoneMentions.
+	EveryoneMentions []string
 	// Limits are the bridge's limits; MaxBodyLength from 500 to 100000.
 	Limits Limits
 	// UserLookup is what findUsers searches by; "" is InfoUserLookupNone.
@@ -185,6 +192,7 @@ func New(cfg Config, m Messenger) (*Bridge, error) {
 		errs = append(errs, checkFeatures(cfg, m)...)
 	}
 	errs = append(errs, checkBots(cfg)...)
+	errs = append(errs, checkMentions(cfg)...)
 	if cfg.Limits.MaxBodyLength > maxBodyLengthCap {
 		errs = append(errs, fmt.Errorf("bridge: limits.max_body_length is above %d, the most this library accepts",
 			maxBodyLengthCap))
@@ -347,6 +355,33 @@ func checkFeatures(cfg Config, m Messenger) []error {
 	return errs
 }
 
+// checkMentions refuses a name of the everyone mentions that the specification does not list, and a repeated one.
+func checkMentions(cfg Config) []error {
+	var errs []error
+	check := func(where string, names []string) {
+		seen := map[string]bool{}
+		for i, name := range names {
+			switch {
+			case !CapabilitiesEveryoneMentions(name).Valid():
+				errs = append(errs, fmt.Errorf("bridge: %s[%d] %q is not one of channel, here, all and everyone", where, i, name))
+			case seen[name]:
+				errs = append(errs, fmt.Errorf("bridge: %s[%d] %q is repeated", where, i, name))
+			default:
+				seen[name] = true
+			}
+		}
+	}
+	check("everyone_mentions", cfg.EveryoneMentions)
+	if names := cfg.Capabilities.EveryoneMentions; names != nil {
+		strs := make([]string, len(*names))
+		for i, n := range *names {
+			strs[i] = string(n)
+		}
+		check("capabilities.everyone_mentions", strs)
+	}
+	return errs
+}
+
 func checkBots(cfg Config) []error {
 	if len(cfg.Bots) == 0 {
 		return []error{errors.New("bridge: bots is empty: a bridge needs at least one bot")}
@@ -448,6 +483,16 @@ func buildInfo(cfg Config) Info {
 		withStyles := *buttons
 		withStyles.Styles = []ButtonStyle{}
 		info.Capabilities.Buttons = &withStyles
+	}
+	if cfg.GroupMentions {
+		info.Capabilities.GroupMentions = new(true)
+	}
+	if cfg.EveryoneMentions != nil {
+		names := make([]CapabilitiesEveryoneMentions, 0, len(cfg.EveryoneMentions))
+		for _, name := range cfg.EveryoneMentions {
+			names = append(names, CapabilitiesEveryoneMentions(name)) // checkMentions accepted the list
+		}
+		info.Capabilities.EveryoneMentions = &names
 	}
 	if info.EventDelivery == nil {
 		info.EventDelivery = []InfoEventDelivery{InfoEventDeliveryPoll, InfoEventDeliveryPush}

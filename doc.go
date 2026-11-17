@@ -94,6 +94,18 @@
 // person, and always in an edit, and the bridge then writes the Name. The test mark of a test message is the first of
 // its Notices. A [LayoutLink]'s Url may be an IRI.
 //
+// # Mentions
+//
+// [ReplaceMentions] and [Bridge.ReplaceMentions] turn the Mention markers of a body into what the bridge's messenger
+// writes. Each entry of the envelope's Mentions has a Kind: [MentionKindMentionKindUser], which is also an entry
+// without kind; [MentionKindMentionKindGroup], with the group's name in ExternalId and DisplayName; or
+// [MentionKindMentionKindEveryone], with the symbolic name "channel", "here", "all" or "everyone" in both. A bridge
+// declares them in info with [Config.GroupMentions] and [Config.EveryoneMentions], and Muster sends only what it
+// declared. Muster decides from a copy of info that may be older than the bridge's own, so the library never refuses a
+// Mention entry for its kind: [Bridge.ReplaceMentions] shows a group or everyone entry that the bridge did not declare
+// as its marker's link text, without calling render. Kind is nil on the raw entries of a message and is set only on
+// the entries that render gets, so a bridge that declares groups or everyone renders through [Bridge.ReplaceMentions].
+//
 // # Events
 //
 // [Bridge.Press], [Bridge.ThreadMessage], [Bridge.MessageDeleted] and [Bridge.DirectMessage] queue an event for the

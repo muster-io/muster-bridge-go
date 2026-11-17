@@ -188,6 +188,59 @@ func ExampleReplaceMentions() {
 	// Output: @U1 acknowledged; @Bob \[ops\] is next.
 }
 
+// A bridge declares the group mentions and the mentions of everyone in the chat that its messenger has. Muster then
+// sends them as entries of mentions with a kind: a group's name stands in external_id, and for everyone the symbolic
+// name. Bridge.ReplaceMentions shows an entry of a kind the bridge did not declare as the marker's link text, and never
+// refuses it.
+func Example_groupMentions() {
+	n := &notebook{}
+	b, err := bridge.New(bridge.Config{
+		Name:             "notebook-bridge",
+		Version:          "1.0.0",
+		MessengerName:    "Notebook",
+		Bots:             []bridge.Bot{{Name: "main", Token: "example-token"}},
+		Limits:           bridge.Limits{MaxBodyLength: 4000},
+		GroupMentions:    true,
+		EveryoneMentions: []string{"here"},
+		Logger:           slog.New(slog.DiscardHandler),
+	}, n)
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = b.Close(context.Background()) }()
+
+	body := `{"channel_id":"alerts","kind":"root","status":"firing","color":"#d32f2f","emoji":"x",` +
+		`"title":"#7 QueueBacklog","link":{"url":"https://muster.example.org/alert-groups/7","label":"Open in Muster"},` +
+		`"body":"[@Alice](muster-mention:m1) [@payments\\_team](muster-mention:m2) [@here](muster-mention:m3) ` +
+		`[@channel](muster-mention:m4)","buttons":[],"notify":true,"mentions":[` +
+		`{"ref":"m1","external_id":"U1","display_name":"Alice"},` +
+		`{"ref":"m2","external_id":"payments_team","display_name":"payments_team","kind":"group"},` +
+		`{"ref":"m3","external_id":"here","display_name":"here","kind":"everyone"},` +
+		`{"ref":"m4","external_id":"channel","display_name":"channel","kind":"everyone"}]}`
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/messages", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer example-token")
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Idempotency-Key", "k1")
+	w := httptest.NewRecorder()
+	b.Handler().ServeHTTP(w, r)
+	fmt.Println(w.Code)
+
+	in := n.messages[0]
+	fmt.Println(b.ReplaceMentions(in.Body, in.Mentions, func(m bridge.Mention) string {
+		switch *m.Kind {
+		case bridge.MentionKindMentionKindGroup:
+			return "<!subteam:" + m.ExternalId + ">"
+		case bridge.MentionKindMentionKindEveryone:
+			return "<!" + m.ExternalId + ">"
+		case bridge.MentionKindMentionKindUser:
+		}
+		return "<@" + m.ExternalId + ">"
+	}))
+	// Output:
+	// 201
+	// <@U1> <!subteam:payments_team> <!here> @channel
+}
+
 // inkNotebook refuses every edit, as a messenger does for messages older than its edit window.
 type inkNotebook struct{ *notebook }
 

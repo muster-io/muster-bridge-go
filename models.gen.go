@@ -61,6 +61,30 @@ func (e ButtonStyle) Valid() bool {
 	}
 }
 
+// Defines values for CapabilitiesEveryoneMentions.
+const (
+	CapabilitiesEveryoneMentionsEveryoneMentionAll      CapabilitiesEveryoneMentions = "all"
+	CapabilitiesEveryoneMentionsEveryoneMentionChannel  CapabilitiesEveryoneMentions = "channel"
+	CapabilitiesEveryoneMentionsEveryoneMentionEveryone CapabilitiesEveryoneMentions = "everyone"
+	CapabilitiesEveryoneMentionsEveryoneMentionHere     CapabilitiesEveryoneMentions = "here"
+)
+
+// Valid indicates whether the value is a known member of the CapabilitiesEveryoneMentions enum.
+func (e CapabilitiesEveryoneMentions) Valid() bool {
+	switch e {
+	case CapabilitiesEveryoneMentionsEveryoneMentionAll:
+		return true
+	case CapabilitiesEveryoneMentionsEveryoneMentionChannel:
+		return true
+	case CapabilitiesEveryoneMentionsEveryoneMentionEveryone:
+		return true
+	case CapabilitiesEveryoneMentionsEveryoneMentionHere:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CapabilitiesPrivateAnswers.
 const (
 	CapabilitiesPrivateAnswersEphemeral CapabilitiesPrivateAnswers = "ephemeral"
@@ -226,6 +250,27 @@ func (e LayoutStatusKey) Valid() bool {
 	}
 }
 
+// Defines values for MentionKind.
+const (
+	MentionKindMentionKindEveryone MentionKind = "everyone"
+	MentionKindMentionKindGroup    MentionKind = "group"
+	MentionKindMentionKindUser     MentionKind = "user"
+)
+
+// Valid indicates whether the value is a known member of the MentionKind enum.
+func (e MentionKind) Valid() bool {
+	switch e {
+	case MentionKindMentionKindEveryone:
+		return true
+	case MentionKindMentionKindGroup:
+		return true
+	case MentionKindMentionKindUser:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MessageKind.
 const (
 	MessageKindRoot         MessageKind = "root"
@@ -383,6 +428,12 @@ type Capabilities struct {
 	// DirectMessages The bot can send direct messages, which Account links by code need.
 	DirectMessages *Capabilities_DirectMessages `json:"direct_messages,omitempty"`
 
+	// EveryoneMentions The mentions of everyone in the chat that the bridge's messenger has, by their symbolic names. Muster sends only those listed here, each as a `mentions` entry of the kind `everyone`; missing or empty, none.
+	EveryoneMentions *[]CapabilitiesEveryoneMentions `json:"everyone_mentions,omitempty"`
+
+	// GroupMentions The bridge renders a group mention that Muster sends as a `mentions` entry of the kind `group`; the Team mentions and group entries of a Destination need it. Missing or false, Muster offers no group mention for the bridge's Connections.
+	GroupMentions *bool `json:"group_mentions,omitempty"`
+
 	// NativeMentions Mention markers become the messenger's own mentions, which notify the person.
 	NativeMentions *bool `json:"native_mentions,omitempty"`
 
@@ -421,6 +472,9 @@ type Capabilities_DirectMessages struct {
 	// BotCanStart Whether the bot can write to a person who never wrote to it.
 	BotCanStart bool `json:"bot_can_start"`
 }
+
+// CapabilitiesEveryoneMentions defines model for Capabilities.EveryoneMentions.
+type CapabilitiesEveryoneMentions string
 
 // CapabilitiesPrivateAnswers defines model for Capabilities.PrivateAnswers.
 type CapabilitiesPrivateAnswers string
@@ -657,16 +711,23 @@ type Link struct {
 	Url   string `json:"url"`
 }
 
-// Mention defines model for Mention.
+// Mention One Mention of the envelope, which a marker `[@Display Name](muster-mention:<ref>)` in the body places: a person (`kind` `user`, the default), a group of the messenger (`group`), or everyone in the chat (`everyone`). Muster sends `group` only while its copy of the bridge's `info`, at most `bridge.info_max_age` (10 minutes) old, declares `group_mentions`, and `everyone` only with a symbolic name that copy lists in `everyone_mentions`; it sends a person without `kind`.
 type Mention struct {
+	// DisplayName The name the marker shows; for a group its name and for everyone in the chat its symbolic name, as `external_id`.
 	DisplayName string `json:"display_name"`
 
-	// ExternalId The account's id in the messenger, as the bridge reported it when the account was linked.
+	// ExternalId For a person, the account's id in the messenger, as the bridge reported it when the account was linked; for a group, the name an Admin typed for the Team mention or the Destination's entry, 1 to 64 letters, digits, `.`, `_` and `-` starting with a letter or a digit, which the bridge maps to its messenger's group; for everyone in the chat, the symbolic name: `channel`, `here`, `all` or `everyone`.
 	ExternalId string `json:"external_id"`
+
+	// Kind What the Mention names; missing, it is `user`. Muster sends the Mention of a person without it.
+	Kind *MentionKind `json:"kind,omitempty"`
 
 	// Ref Names the marker `muster-mention:<ref>` in the body.
 	Ref string `json:"ref"`
 }
+
+// MentionKind What the Mention names; missing, it is `user`. Muster sends the Mention of a person without it.
+type MentionKind string
 
 // MessageContent The envelope of a message. A Root message and a test message also carry `layout`, the same content as `body` as plain-text data; a bridge renders either `body` or `layout`, and a bridge that ignores `layout` is unaffected. A message without `layout` is rendered from `body`, always — a Storm summary, a Root message whose Route renders it with a Root message template or a line template of its own, or with Muster's fallback template, whose content only `body` holds, or a message of an earlier version of Muster.
 type MessageContent struct {
