@@ -591,7 +591,7 @@ type Layout struct {
 	// Alerts The Alerts by the label that tells them apart; null for an Alert Group of one Alert, or when shortening removed them.
 	Alerts *LayoutAlerts `json:"alerts"`
 
-	// Assignees The people Paged for the Alert Group, before an acknowledgement; empty until Muster Pages people through Escalation chains.
+	// Assignees The Assignees, the people the Escalation chains Paged last and reached, each with the owning Team of their chain in `team` where it has one, before an acknowledgement; empty until Muster Pages people through Escalation chains.
 	Assignees []LayoutPerson `json:"assignees"`
 
 	// Description The `description` annotation of the first Alert that has one; empty when there is none, or when shortening removed it.
@@ -606,13 +606,13 @@ type Layout struct {
 	// Links The links, "Open in Muster" to the Alert Group page first.
 	Links []LayoutLink `json:"links"`
 
-	// Notices The notices that apply, such as "Reopened ×2", then the footer — who snoozed or resolved the Alert Group, or why it resolved — each as a line. Who acknowledged it is `owner`, not a line.
+	// Notices The notices that apply, such as "Reopened ×2", then the footer — who snoozed or resolved the Alert Group, or why it resolved — each as a line. Who acknowledged it is `owner`, not a line, and "Escalation chains stopped" after an acknowledgement that stopped them is the last line; the Assignees are `assignees`, not a line.
 	Notices []string `json:"notices"`
 
 	// Number The Alert Group's number alone, without `#`, as a field of its own, because `#N` in text becomes a hashtag in some messengers.
 	Number int `json:"number"`
 
-	// Owner Who acknowledged the Alert Group, while it is acknowledged; null otherwise.
+	// Owner Who acknowledged the Alert Group, without a Team, while it is acknowledged; null otherwise.
 	Owner  *LayoutPerson `json:"owner"`
 	Status LayoutStatus  `json:"status"`
 
